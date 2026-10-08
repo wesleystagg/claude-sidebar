@@ -1,0 +1,5 @@
+# Force everyone through one of the three forms above, so every note lands with
+# a type and a label instead of a blank box. Flip to `true` if you (Wesley) want
+# the option of a freeform issue from the browser; you can always file freeform
+# from the gh CLI regardless.
+blank_issues_enabled: false

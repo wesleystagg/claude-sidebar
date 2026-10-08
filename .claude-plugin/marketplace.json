@@ -1,0 +1,17 @@
+{
+  "name": "claude-sidebar",
+  "owner": {
+    "name": "Wesley Stagg",
+    "url": "https://github.com/wesleystagg"
+  },
+  "metadata": {
+    "description": "Wesley Stagg's Claude Code mods"
+  },
+  "plugins": [
+    {
+      "name": "sidebar",
+      "source": "./",
+      "description": "Docked side panel for Claude Code: context window by category, rate-limit usage with burn rate, tokens by model, and every spawned agent with its model and context fill. Toggle with /sidebar."
+    }
+  ]
+}

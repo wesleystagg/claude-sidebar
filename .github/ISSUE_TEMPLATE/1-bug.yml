@@ -1,0 +1,49 @@
+name: 🐛 Bug — something is broken
+description: Report something that isn't working the way it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for the report! Fill in what you can — even one sentence and a screenshot is a big help."
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, or what did you see?
+      placeholder: e.g. I tapped the save button and nothing happened.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen instead?
+      placeholder: e.g. It should have saved and shown up in the list.
+    validations:
+      required: false
+  - type: input
+    id: where
+    attributes:
+      label: Where in the app were you?
+      description: Which page or screen?
+      placeholder: e.g. the settings page, or the screen right after signing in
+    validations:
+      required: false
+  - type: dropdown
+    id: device
+    attributes:
+      label: What were you using?
+      options:
+        - Phone
+        - Tablet
+        - Computer
+        - Not sure
+    validations:
+      required: false
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot (optional)
+      description: If you have one, drag the image right into this box — it helps a lot.
+    validations:
+      required: false

@@ -1,0 +1,4 @@
+# Engine-written type stubs, regenerated on every load
+.claude-plugin/types/
+node_modules/
+.DS_Store

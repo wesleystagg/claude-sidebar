@@ -1,0 +1,21 @@
+{
+  "name": "sidebar",
+  "version": "0.1.0",
+  "description": "Docked side panel for Claude Code: context window by category, rate-limit usage with burn rate, tokens by model, and every spawned agent with its model and context fill. Toggle with /sidebar.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Wesley Stagg",
+    "url": "https://github.com/wesleystagg"
+  },
+  "homepage": "https://github.com/wesleystagg/claude-sidebar",
+  "repository": "https://github.com/wesleystagg/claude-sidebar",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "plugin",
+    "sidebar",
+    "context",
+    "usage",
+    "agents"
+  ]
+}

@@ -1,0 +1,26 @@
+name: 🎨 UI change — how it looks or feels
+description: Something about the look, layout, wording, or feel of a screen.
+title: "[UI]: "
+labels: ["ui"]
+body:
+  - type: input
+    id: screen
+    attributes:
+      label: Which screen?
+      placeholder: e.g. Home, Settings, the screen after signing in
+    validations:
+      required: true
+  - type: textarea
+    id: whats-off
+    attributes:
+      label: What feels off, and what would be better?
+      placeholder: e.g. The search box is squared-off and easy to miss — a rounded, lighter box would feel friendlier.
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot
+      description: A picture is worth a thousand words here — drag one in if you can.
+    validations:
+      required: false

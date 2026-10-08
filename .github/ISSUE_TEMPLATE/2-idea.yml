@@ -1,0 +1,23 @@
+name: 💡 Idea — a feature or improvement
+description: Suggest something new, or a way to make something better.
+title: "[Idea]: "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: "Ideas are gold — don't worry about whether it's possible, just get it down."
+  - type: textarea
+    id: idea
+    attributes:
+      label: What's the idea?
+      placeholder: e.g. Let me get back to the thing I was last working on straight from the home screen.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help?
+      description: What problem does it solve, or who does it help?
+      placeholder: e.g. It would save a few taps every single time, and that adds up.
+    validations:
+      required: false
