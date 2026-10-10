@@ -587,6 +587,132 @@ async function markActivity($: EngineInterface, path: string | undefined, kind: 
   }
 }
 
+const SHELL_READERS = new Set(['cat', 'head', 'tail', 'less', 'more', 'bat', 'sed', 'awk', 'grep', 'rg', 'wc', 'diff', 'stat', 'file', 'ls'])
+const SHELL_PREFIXES = new Set(['sudo', 'env', 'time', 'nice'])
+/** Options whose next word is their value, not a file, per reader. */
+const SHELL_OPTION_ARGS: Record<string, string[]> = {
+  sed: ['-e', '-f'],
+  grep: ['-e', '-f', '-g', '-t', '-m', '-A', '-B', '-C', '--include', '--exclude', '--glob'],
+  rg: ['-e', '-f', '-g', '-t', '-m', '-A', '-B', '-C', '--include', '--exclude', '--glob'],
+  head: ['-n', '-c'],
+  tail: ['-n', '-c'],
+  awk: ['-F', '-v', '-f'],
+}
+const SHELL_READ_CAP = 20
+
+/** A shell command as segments of words: split on `|`, `&&`, `||`, `;` and newlines outside quotes, words unquoted. */
+function shellSegments(command: string): string[][] {
+  const segments: string[][] = []
+  let words: string[] = []
+  let word = ''
+  let inWord = false
+  let quote: '"' | "'" | null = null
+  const endWord = (): void => {
+    if (inWord) words.push(word)
+    word = ''
+    inWord = false
+  }
+  const endSegment = (): void => {
+    endWord()
+    if (words.length > 0) segments.push(words)
+    words = []
+  }
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else word += ch
+    } else if (quote === '"') {
+      if (ch === '"') quote = null
+      else if (ch === '\\' && i + 1 < command.length) word += command[++i]!
+      else word += ch
+    } else if (ch === '\\' && i + 1 < command.length) {
+      word += command[++i]!
+      inWord = true
+    } else if (ch === "'" || ch === '"') {
+      quote = ch
+      inWord = true
+    } else if (ch === '|' || ch === ';' || ch === '\n') {
+      endSegment()
+    } else if (ch === '&' && command[i + 1] === '&') {
+      endSegment()
+      i += 1
+    } else if (ch === ' ' || ch === '\t') {
+      endWord()
+    } else {
+      word += ch
+      inWord = true
+    }
+  }
+  endSegment()
+  return segments
+}
+
+/** The paths a shell command's reader commands (`cat`, `sed`, `grep`, ...) name, in order and unique; globs and flags are dropped. */
+function readTargets(command: string): string[] {
+  const found: string[] = []
+  // A `cd` earlier in the command moves where later relative paths are read from.
+  let dir = ''
+  for (const words of shellSegments(command)) {
+    let at = 0
+    while (at < words.length && (SHELL_PREFIXES.has(words[at]!) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at]!))) at += 1
+    if (words[at] === 'cd') {
+      const to = words[at + 1] ?? '~'
+      dir = to.startsWith('/') || to === '~' || to.startsWith('~/') || dir === '' ? to : `${dir}/${to}`
+      continue
+    }
+    const reader = words[at]?.split('/').pop() ?? ''
+    if (!SHELL_READERS.has(reader)) continue
+    const takesValue = SHELL_OPTION_ARGS[reader] ?? []
+    for (let i = at + 1; i < words.length; i += 1) {
+      const w = words[i]!
+      if (/^\d*[<>]/.test(w)) {
+        if (/^\d*(>>?|<)$/.test(w)) i += 1
+        continue
+      }
+      if (w.startsWith('-')) {
+        if (takesValue.includes(w)) i += 1
+        continue
+      }
+      if (/[*?[]/.test(w)) continue
+      const target = dir === '' || w.startsWith('/') || w === '~' || w.startsWith('~/') ? w : `${dir}/${w}`
+      if (!found.includes(target)) found.push(target)
+    }
+  }
+  return found
+}
+
+/** `a/./b/../c` to `a/c`; the input is absolute. */
+function normalisePath(path: string): string {
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return `/${out.join('/')}`
+}
+
+/** Marks the existing files and folders inside the repo (or cwd) that a shell command's readers name as read. */
+async function markShellReads($: EngineInterface, command: string): Promise<void> {
+  try {
+    if (!(await read($, enabled))) return
+    const candidates = readTargets(command).slice(0, SHELL_READ_CAP)
+    if (candidates.length === 0) return
+    const [cwd, repo, home] = await Promise.all([$.session.cwd(), $.session.repo(), $.env.get('HOME')])
+    const root = (repo?.root ?? cwd).replace(/\/+$/, '')
+    for (const c of candidates) {
+      const raw = c === '~' || c.startsWith('~/') ? (home ? `${home}${c.slice(1)}` : '') : c
+      if (raw === '') continue
+      const path = normalisePath(raw.startsWith('/') ? raw : `${cwd}/${raw}`)
+      if (!path.startsWith(`${root}/`) || !(await $.fs.exists(path))) continue
+      await markActivity($, path, 'read')
+    }
+  } catch {
+    // Bookkeeping only: a failure here must never fail the Bash call it rides on.
+  }
+}
+
 /** Drops marks older than ACTIVITY_MS. */
 async function pruneActivity($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
@@ -736,11 +862,11 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
           ignored: xy === '!!',
         })
       } else if (kid.opaque) {
-        rows.push({ ...base, isDir: true, expanded: false, opaque: kid.opaque, ignored: kid.opaque === 'ignored', letter: kid.opaque === 'untracked' ? '?' : null })
+        rows.push({ ...base, mark: marks[kid.path]?.kind ?? null, isDir: true, expanded: false, opaque: kid.opaque, ignored: kid.opaque === 'ignored', letter: kid.opaque === 'untracked' ? '?' : null })
       } else {
         const open = expanded.has(kid.path)
         const roll = state.isRepo ? rollUp(state, kid.path) : { add: 0, del: 0, newN: 0, modN: 0, delN: 0 }
-        rows.push({ ...base, isDir: true, expanded: open, ...roll })
+        rows.push({ ...base, mark: marks[kid.path]?.kind ?? null, isDir: true, expanded: open, ...roll })
         if (open) walk(kid, depth + 1)
       }
     }
@@ -1084,6 +1210,7 @@ export const register: Register = (on, options) => {
 
   // The same through the cfn command line.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    await markShellReads($, e.command)
     const ask = parseCfnAsk(e.command)
     const isOn = ask !== null && (await read($, enabled))
     if (isOn) await addRun($, { id: e.tool_use_id, label: ask.node, type: 'local', model: ask.model })
