@@ -148,6 +148,10 @@ modification time. There are no background colours, only coloured text.
   reading it, both from when the Read, Write, Edit or NotebookEdit call
   starts until 45 seconds after the last event (subagents' calls count; a
   write replaces a read, and a later read does not downgrade a live write).
+  While a file is marked, a band of light sweeps along its icon and name,
+  bright for the first 2.7 seconds and in a dimmer shade for the rest of
+  the 45 (orange for a write, purple for a read). When no file is marked
+  nothing moves.
   Otherwise git's colour applies: amber modified, green added or untracked,
   blue renamed or copied, red deleted (the name also struck through), and
   a lighter blue for a clean file that is committed but not pushed.
@@ -175,6 +179,9 @@ Everything comes from the Claude Code plugin API, with no extra API calls:
   Agent context bars are scaled to the session model's window, since the
   engine does not report another model's window size; the token figure
   beside the bar is exact.
+- The FILES rows are drawn by a surface module, `hooks/rows.tsx`, that runs
+  inside the terminal with its own 90 ms tick (only while a file is marked),
+  so the sweep animation does not redraw the pane.
 - FILES state comes from git itself (`status`, `ls-files`, `diff --numstat`
   and `diff --name-only @{upstream}..HEAD`), run through the engine with
   repo hooks off, plus a disk listing (the engine's `fs.list`) of the repo
@@ -208,8 +215,9 @@ it; if the icons draw as boxes, select the font in the terminal or set
 
 ## Development
 
-The plugin is a single hooks module, `hooks/register.tsx`, with its state
-contract in `types/index.d.ts` and a test beside it.
+The plugin is a hooks module, `hooks/register.tsx`, with its state contract
+in `types/index.d.ts` and a test beside it, plus one surface module,
+`hooks/rows.tsx`, that draws the FILES rows.
 
 ```bash
 claude plugin validate .   # manifest, marketplace file and hooks module
