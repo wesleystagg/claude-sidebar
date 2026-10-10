@@ -489,19 +489,23 @@ async function refreshFilesIfOn($: EngineInterface): Promise<void> {
 
 /** Marks a file the session is reading or writing; a path outside the repo (or cwd) is ignored. */
 async function markActivity($: EngineInterface, path: string | undefined, kind: Activity['kind']): Promise<void> {
-  if (!path || !(await read($, enabled))) return
-  const [cwd, repo] = await Promise.all([$.session.cwd(), $.session.repo()])
-  const root = (repo?.root ?? cwd).replace(/\/+$/, '')
-  if (!path.startsWith(`${root}/`)) return
-  const rel = path.slice(root.length + 1)
-  const at = await $.clock.now()
-  $.clock.after(ACTIVITY_MS, () => void pruneActivity($))
-  await update($, activity, marks => {
-    const prev = marks[rel]
-    // A live write mark is not downgraded by a read.
-    if (kind === 'read' && prev?.kind === 'write' && at - prev.at < ACTIVITY_MS) return marks
-    return { ...marks, [rel]: { kind, at } }
-  })
+  try {
+    if (!path || !(await read($, enabled))) return
+    const [cwd, repo] = await Promise.all([$.session.cwd(), $.session.repo()])
+    const root = (repo?.root ?? cwd).replace(/\/+$/, '')
+    if (!path.startsWith(`${root}/`)) return
+    const rel = path.slice(root.length + 1)
+    const at = await $.clock.now()
+    $.clock.after(ACTIVITY_MS, () => void pruneActivity($))
+    await update($, activity, marks => {
+      const prev = marks[rel]
+      // A live write mark is not downgraded by a read.
+      if (kind === 'read' && prev?.kind === 'write' && at - prev.at < ACTIVITY_MS) return marks
+      return { ...marks, [rel]: { kind, at } }
+    })
+  } catch {
+    // Bookkeeping only: a failure here must never fail the tool call it rides on.
+  }
 }
 
 /** Drops marks older than ACTIVITY_MS. */
@@ -531,8 +535,6 @@ type FileRow = {
   opaque?: TreeNode['opaque']
   /** A collapsed folder's right-hand figure: the files inside it. */
   count: number
-  /** True when that figure counts flagged files, so it draws in the warning color. */
-  countFlagged: boolean
 }
 
 function addNode(root: TreeNode, path: string, opaque?: TreeNode['opaque']): void {
@@ -590,7 +592,7 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
       (a, b) => Number(b.isDir) - Number(a.isDir) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     )
     for (const kid of kids) {
-      const base = { path: kid.path, name: kid.name, depth, mark: null, letter: null, staged: false, add: 0, del: 0, unpushed: false, ignored: false, count: 0, countFlagged: false }
+      const base = { path: kid.path, name: kid.name, depth, mark: null, letter: null, staged: false, add: 0, del: 0, unpushed: false, ignored: false, count: 0 }
       if (!kid.isDir) {
         const xy = state.status[kid.path]?.xy
         const git = xy === undefined ? null : gitMark(xy)
@@ -1114,7 +1116,7 @@ export const register: Register = on => {
                     {fit(r.name, nameWidth)}{status === '' ? '' : ' '}
                   </Text>
                   {status !== '' && (
-                    <Text color={r.isDir ? (r.countFlagged ? 'warning' : 'text') : color} dimColor={r.isDir ? !r.countFlagged : dim}>
+                    <Text color={r.isDir ? 'text' : color} dimColor={r.isDir || dim}>
                       {status}
                     </Text>
                   )}

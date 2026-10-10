@@ -43,13 +43,13 @@ AGENTS 1 running · 84k tok
   haiku-5-5 · Fix typo in README
 
 FILES main ↑1 · 3 changed
+  ▸ docs                                   1
   ▾ hooks
   ◆ register.tsx                    M +41 −3
     register.test.tsx                  A +88
+  ▸ node_modules
   ▾ types
   ◇ index.d.ts                             ↑
-  ▸ docs                                   1
-  ▸ node_modules
   README.md                          M +6 −1
 ```
 
