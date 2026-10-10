@@ -41,6 +41,16 @@ AGENTS 1 running · 84k tok
   ctx ██░░░░░░░░ 40k · 7 tools · Bash
 ✓ coder-quick                  12s
   haiku-5-5 · Fix typo in README
+
+FILES main ↑1 · 3 changed
+  ▸ docs                                   1
+  ▾ hooks
+  ◆ register.tsx                    M +41 −3
+    register.test.tsx                  A +88
+  ▸ node_modules
+  ▾ types
+  ◇ index.d.ts                             ↑
+  README.md                          M +6 −1
 ```
 
 ## Install
@@ -99,6 +109,36 @@ done, red cross failed. A subagent on a frontier-tier model (Fable, Opus,
 Mythos) is flagged `⚠ frontier`. Finished rows fade two minutes after they
 end; the header keeps the session's total burn across all runs.
 
+**FILES.** The working directory as a pruned tree, at the bottom of the
+panel. Folders open (`▾`) only where a file needs your eye; every other folder
+is one collapsed row (`▸`) with the number of files inside it at the right.
+A file is flagged when it has a git change, is committed but not pushed, or
+the session is touching it. Each row is coloured text plus a one-character
+mark, with no background colours:
+
+- `◆` (orange) the session is writing the file; `◇` (purple) it is reading
+  it. The mark appears when the Read, Write, Edit or NotebookEdit call
+  starts, so it shows while the tool runs, and fades 45 seconds after the
+  last event. Subagents' calls count too. A write mark replaces a read mark,
+  and a later read does not downgrade a live write mark.
+- The letter at the right is git's state: `M` modified, `A` added, `D`
+  deleted, `R` renamed, `C` copied, `?` untracked, followed by `+added −deleted`
+  lines (staged and unstaged summed). An unstaged change shows over a staged
+  one. `↑` alone marks a clean file that is committed but not yet pushed.
+- The name and letter take the state colour: orange for a write, purple for
+  a read, red deleted, green staged, amber unstaged, blue unpushed, dim for
+  untracked and ignored, plain otherwise.
+- Gitignored entries are shown, dim, not hidden. A fully ignored folder is
+  one collapsed dim row with no count; an untracked folder is one collapsed
+  row marked `?`.
+- Folders sort before files, each case-insensitive alphabetical. The tree
+  draws at most 40 rows and ends with a dim `… N more`.
+
+The header shows `FILES`, the branch, `↑N` when commits are unpushed, `↓N`
+when the upstream is ahead, and `· N changed` (untracked included, ignored
+excluded) or `· clean`. Outside a git repository it reads `not a git repo`
+and lists the top level of the working directory, folders collapsed.
+
 ## How it measures
 
 Everything comes from the Claude Code plugin API, with no extra API calls:
@@ -113,6 +153,12 @@ Everything comes from the Claude Code plugin API, with no extra API calls:
   Agent context bars are scaled to the session model's window, since the
   engine does not report another model's window size; the token figure
   beside the bar is exact.
+- FILES state comes from git itself (`status`, `ls-files`, `diff --numstat`
+  and `diff --name-only @{upstream}..HEAD`), run through the engine with
+  repo hooks off. It is refreshed after Write, Edit, NotebookEdit and Bash
+  calls, on each prompt and once a minute. There is no file watcher, so an
+  edit from another terminal shows at the next refresh. Refreshes closer than
+  a second apart are folded into one.
 - Workflow agents and cloud-remote agents raise no local events and are not
   tracked.
 

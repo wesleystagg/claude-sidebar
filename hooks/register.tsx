@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface, Timer } from 'claude-code'
 
-import type { AgentRow, Compactions, ModelTally, Place, Sample, Segment, Snapshot, Window } from '../types'
+import type { Activity, AgentRow, Compactions, FilesState, ModelTally, Place, Sample, Segment, Snapshot, Window } from '../types'
 
 const STORE_KEY = 'enabled'
 const COMMAND = 'sidebar'
 const PANE = 'sidebar'
-const WANT_COLUMNS = 36
+const WANT_COLUMNS = 44
 const TICK_MS = 60_000
 const MAX_AGENT_ROWS = 12
 /** A finished run's row fades this long after it ended; running rows always stay. */
@@ -16,6 +16,14 @@ const CTX_BAR = 10
 /** Minutes of rate-limit samples kept for the burn rate, and the least span it is read over. */
 const SAMPLE_KEEP = 30
 const SAMPLE_MIN_SPAN_MS = 3 * 60_000
+/** A file the session read or wrote keeps its mark this long after the last event. */
+const ACTIVITY_MS = 45_000
+/** A git refresh that finished more recently than this is not repeated at once. */
+const FILES_MIN_GAP_MS = 1000
+/** Rows of the FILES tree drawn; the rest collapse into a `… N more` line. */
+const FILES_MAX_ROWS = 40
+/** The read mark's color: a hex, since no theme key is purple. */
+const READ_COLOR = '#7F77DD'
 
 const enabled = atom({ plugin: 'sidebar', key: 'enabled' } as const, false)
 const snapshot = atom({ plugin: 'sidebar', key: 'snapshot' } as const, null)
@@ -28,6 +36,8 @@ const effort = atom({ plugin: 'sidebar', key: 'effort' } as const, null)
 const mode = atom({ plugin: 'sidebar', key: 'mode' } as const, null)
 const place = atom({ plugin: 'sidebar', key: 'place' } as const, null)
 const byModel = atom({ plugin: 'sidebar', key: 'byModel' } as const, {})
+const files = atom({ plugin: 'sidebar', key: 'files' } as const, null)
+const activity = atom({ plugin: 'sidebar', key: 'activity' } as const, {})
 
 const GLYPH: Record<Segment['kind'], string> = { used: '█', buffer: '▒', free: '░', deferred: '' }
 const MARK: Record<Segment['kind'], string> = { used: '■', buffer: '▒', free: '░', deferred: '' }
@@ -319,6 +329,321 @@ async function reconcileRuns($: EngineInterface): Promise<void> {
   }
 }
 
+// ---- FILES: the working directory as a pruned tree, coloured by git and tool activity ----
+
+type GitMark = { letter: string; staged: boolean }
+
+/** The one letter a porcelain `XY` shows: an unstaged change wins over a staged one; ignored has none. */
+function gitMark(xy: string): GitMark | null {
+  if (xy === '!!') return null
+  if (xy === '??') return { letter: '?', staged: false }
+  const x = xy[0] ?? ' '
+  const y = xy[1] ?? ' '
+  if (y === 'M' || y === 'D') return { letter: y, staged: false }
+  if ('AMDRC'.includes(x)) return { letter: x, staged: true }
+  const other = y !== ' ' ? y : x
+  return other === ' ' ? null : { letter: other, staged: false }
+}
+
+function parseStatus(out: string): Pick<FilesState, 'branch' | 'ahead' | 'behind' | 'hasUpstream' | 'status'> {
+  const status: Record<string, { xy: string }> = {}
+  const result: Pick<FilesState, 'branch' | 'ahead' | 'behind' | 'hasUpstream' | 'status'> = { ahead: 0, behind: 0, hasUpstream: false, status }
+  const fields = out.split('\0')
+  for (let i = 0; i < fields.length; i += 1) {
+    const f = fields[i] ?? ''
+    if (f === '') continue
+    if (f.startsWith('## ')) {
+      const line = f.slice(3)
+      const counts = /\[([^\]]*)\]\s*$/.exec(line)
+      const head = (counts ? line.slice(0, counts.index) : line).trim()
+      result.hasUpstream = head.includes('...')
+      const name = (head.split('...')[0] ?? head).replace(/^(?:No commits yet on|Initial commit on) /, '').replace(/ \(no branch\)$/, '')
+      if (name !== '') result.branch = name
+      result.ahead = Number(/ahead (\d+)/.exec(counts?.[1] ?? '')?.[1] ?? 0)
+      result.behind = Number(/behind (\d+)/.exec(counts?.[1] ?? '')?.[1] ?? 0)
+      continue
+    }
+    const xy = f.slice(0, 2)
+    status[f.slice(3)] = { xy }
+    // A rename or copy is followed by one more field, the path it came from.
+    if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') i += 1
+  }
+  return result
+}
+
+/** `added<TAB>deleted<TAB>path` per entry; binary files show `-`, read as 0. */
+function parseNumstat(out: string, into: Record<string, { add: number; del: number }>): void {
+  const fields = out.split('\0')
+  for (let i = 0; i < fields.length; i += 1) {
+    const f = fields[i] ?? ''
+    if (f === '') continue
+    const parts = f.split('\t')
+    const add = Number(parts[0]) || 0
+    const del = Number(parts[1]) || 0
+    let path = parts.slice(2).join('\t')
+    // A rename lists an empty path, then the old and the new path as their own fields.
+    if (path === '') {
+      path = fields[i + 2] ?? ''
+      i += 2
+    }
+    if (path === '') continue
+    const prev = into[path] ?? { add: 0, del: 0 }
+    into[path] = { add: prev.add + add, del: prev.del + del }
+  }
+}
+
+function splitNul(out: string | null): string[] {
+  return (out ?? '').split('\0').filter(f => f !== '')
+}
+
+/** Runs git in the repo root; null on a failure or a non-zero exit, never a throw. */
+async function runGit($: EngineInterface, root: string, args: string[]): Promise<string | null> {
+  try {
+    const done = await $.process.run(['git', ...args], { cwd: root })
+    return done.exitCode === 0 ? done.stdout : null
+  } catch {
+    return null
+  }
+}
+
+// One git refresh at a time; a call that lands during one joins it, and one that lands
+// within FILES_MIN_GAP_MS of the last finish is replayed once when that gap is over.
+let filesRun: Promise<void> | null = null
+let filesDoneAt: number | null = null
+let filesRetry = false
+
+async function gatherFiles($: EngineInterface): Promise<void> {
+  try {
+    const [cwd, repo] = await Promise.all([$.session.cwd(), $.session.repo()])
+    const takenAt = await $.clock.now()
+    if (!repo) {
+      const entries = await $.fs.list(cwd)
+      await update($, files, () => ({
+        root: cwd,
+        isRepo: false,
+        ahead: 0,
+        behind: 0,
+        hasUpstream: false,
+        tracked: entries.filter(en => en.kind === 'file').map(en => en.name),
+        plainDirs: entries.filter(en => en.kind === 'dir').map(en => en.name),
+        status: {},
+        numstat: {},
+        unpushed: [],
+        takenAt,
+      }))
+      return
+    }
+    const root = repo.root
+    const [statusOut, listOut, unstagedOut, stagedOut, unpushedOut] = await Promise.all([
+      runGit($, root, ['status', '--porcelain=v1', '-z', '--branch', '--untracked-files=normal', '--ignored=traditional']),
+      runGit($, root, ['ls-files', '-z']),
+      runGit($, root, ['diff', '--numstat', '-z']),
+      runGit($, root, ['diff', '--numstat', '--cached', '-z']),
+      runGit($, root, ['diff', '--name-only', '-z', '@{upstream}..HEAD']),
+    ])
+    // Git gave nothing at all: keep the last drawing rather than blanking it.
+    if (statusOut === null && listOut === null) return
+    const numstat: Record<string, { add: number; del: number }> = {}
+    parseNumstat(unstagedOut ?? '', numstat)
+    parseNumstat(stagedOut ?? '', numstat)
+    const next: FilesState = {
+      root,
+      isRepo: true,
+      ...parseStatus(statusOut ?? ''),
+      tracked: splitNul(listOut),
+      numstat,
+      unpushed: splitNul(unpushedOut),
+      takenAt,
+    }
+    await update($, files, () => next)
+  } catch {
+    // No session bound yet: keep the last drawing.
+  }
+}
+
+async function refreshFiles($: EngineInterface): Promise<void> {
+  if (filesRun) return filesRun
+  const now = await $.clock.now()
+  if (filesRun) return filesRun
+  if (filesDoneAt !== null && now >= filesDoneAt && now - filesDoneAt < FILES_MIN_GAP_MS) {
+    if (!filesRetry) {
+      filesRetry = true
+      $.clock.after(FILES_MIN_GAP_MS - (now - filesDoneAt), () => {
+        filesRetry = false
+        void refreshFiles($)
+      })
+    }
+    return
+  }
+  const run = gatherFiles($).finally(async () => {
+    filesRun = null
+    filesDoneAt = await $.clock.now()
+  })
+  filesRun = run
+  return run
+}
+
+async function refreshFilesIfOn($: EngineInterface): Promise<void> {
+  if (await read($, enabled)) void refreshFiles($)
+}
+
+/** Marks a file the session is reading or writing; a path outside the repo (or cwd) is ignored. */
+async function markActivity($: EngineInterface, path: string | undefined, kind: Activity['kind']): Promise<void> {
+  try {
+    if (!path || !(await read($, enabled))) return
+    const [cwd, repo] = await Promise.all([$.session.cwd(), $.session.repo()])
+    const root = (repo?.root ?? cwd).replace(/\/+$/, '')
+    if (!path.startsWith(`${root}/`)) return
+    const rel = path.slice(root.length + 1)
+    const at = await $.clock.now()
+    $.clock.after(ACTIVITY_MS, () => void pruneActivity($))
+    await update($, activity, marks => {
+      const prev = marks[rel]
+      // A live write mark is not downgraded by a read.
+      if (kind === 'read' && prev?.kind === 'write' && at - prev.at < ACTIVITY_MS) return marks
+      return { ...marks, [rel]: { kind, at } }
+    })
+  } catch {
+    // Bookkeeping only: a failure here must never fail the tool call it rides on.
+  }
+}
+
+/** Drops marks older than ACTIVITY_MS. */
+async function pruneActivity($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  await update($, activity, marks => {
+    const live = Object.entries(marks).filter(([, m]) => now - m.at < ACTIVITY_MS)
+    return live.length === Object.keys(marks).length ? marks : Object.fromEntries(live)
+  })
+}
+
+type TreeNode = { name: string; path: string; isDir: boolean; kids: Map<string, TreeNode>; opaque?: 'ignored' | 'untracked' | 'plain' }
+
+type FileRow = {
+  path: string
+  name: string
+  depth: number
+  isDir: boolean
+  expanded: boolean
+  mark: 'read' | 'write' | null
+  letter: string | null
+  staged: boolean
+  add: number
+  del: number
+  unpushed: boolean
+  ignored: boolean
+  opaque?: TreeNode['opaque']
+  /** A collapsed folder's right-hand figure: the files inside it. */
+  count: number
+}
+
+function addNode(root: TreeNode, path: string, opaque?: TreeNode['opaque']): void {
+  const parts = path.split('/').filter(part => part !== '')
+  let node = root
+  parts.forEach((part, i) => {
+    const isLast = i === parts.length - 1
+    let kid = node.kids.get(part)
+    if (!kid) {
+      kid = { name: part, path: parts.slice(0, i + 1).join('/'), isDir: !isLast || opaque !== undefined, kids: new Map() }
+      node.kids.set(part, kid)
+    }
+    if (isLast && opaque !== undefined) kid.opaque = opaque
+    node = kid
+  })
+}
+
+/** The pruned tree as drawn rows: folders open only where a flagged file sits below them. */
+function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: FileRow[]; more: number } {
+  const unpushed = new Set(state.unpushed)
+  const root: TreeNode = { name: '', path: '', isDir: true, kids: new Map() }
+  for (const path of state.tracked) addNode(root, path)
+  for (const dir of state.plainDirs ?? []) addNode(root, dir, 'plain')
+  for (const [path, s] of Object.entries(state.status)) {
+    if (path.endsWith('/')) addNode(root, path, s.xy === '!!' ? 'ignored' : 'untracked')
+    else addNode(root, path)
+  }
+  for (const path of Object.keys(marks)) addNode(root, path)
+
+  const flaggedFile = (path: string): boolean => {
+    const xy = state.status[path]?.xy
+    return (xy !== undefined && xy !== '!!') || unpushed.has(path) || marks[path] !== undefined
+  }
+  const countFlagged = (node: TreeNode): number => {
+    let n = 0
+    for (const kid of node.kids.values()) {
+      if (kid.opaque) n += kid.opaque === 'untracked' ? 1 : 0
+      else if (kid.isDir) n += countFlagged(kid)
+      else if (flaggedFile(kid.path)) n += 1
+    }
+    return n
+  }
+  const countFiles = (node: TreeNode): number => {
+    let n = 0
+    for (const kid of node.kids.values()) {
+      if (kid.opaque) continue
+      n += kid.isDir ? countFiles(kid) : 1
+    }
+    return n
+  }
+
+  const rows: FileRow[] = []
+  const walk = (node: TreeNode, depth: number): void => {
+    const kids = [...node.kids.values()].sort(
+      (a, b) => Number(b.isDir) - Number(a.isDir) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+    )
+    for (const kid of kids) {
+      const base = { path: kid.path, name: kid.name, depth, mark: null, letter: null, staged: false, add: 0, del: 0, unpushed: false, ignored: false, count: 0 }
+      if (!kid.isDir) {
+        const xy = state.status[kid.path]?.xy
+        const git = xy === undefined ? null : gitMark(xy)
+        const stat = state.numstat[kid.path]
+        rows.push({
+          ...base,
+          isDir: false,
+          expanded: false,
+          mark: marks[kid.path]?.kind ?? null,
+          letter: git?.letter ?? null,
+          staged: git?.staged ?? false,
+          add: stat?.add ?? 0,
+          del: stat?.del ?? 0,
+          unpushed: unpushed.has(kid.path),
+          ignored: xy === '!!',
+        })
+      } else if (kid.opaque) {
+        rows.push({ ...base, isDir: true, expanded: false, opaque: kid.opaque, ignored: kid.opaque === 'ignored', letter: kid.opaque === 'untracked' ? '?' : null })
+      } else {
+        const open = countFlagged(kid) > 0
+        rows.push({ ...base, isDir: true, expanded: open, count: open ? 0 : countFiles(kid) })
+        if (open) walk(kid, depth + 1)
+      }
+    }
+  }
+  walk(root, 0)
+  return { rows: rows.slice(0, FILES_MAX_ROWS), more: Math.max(0, rows.length - FILES_MAX_ROWS) }
+}
+
+/** The color of a row's name and letter: activity, then git state, then plain. */
+function rowColor(r: FileRow): { color: string; dim: boolean } {
+  if (r.mark === 'write') return { color: 'claude', dim: false }
+  if (r.mark === 'read') return { color: READ_COLOR, dim: false }
+  if (r.ignored) return { color: 'text', dim: true }
+  if (r.isDir) return { color: 'text', dim: r.opaque === 'untracked' }
+  if (r.letter === 'D') return { color: 'error', dim: false }
+  if (r.letter === '?') return { color: 'text', dim: true }
+  if (r.letter) return { color: r.staged ? 'success' : 'warning', dim: false }
+  if (r.unpushed) return { color: 'permission', dim: false }
+  return { color: 'text', dim: false }
+}
+
+/** The right-aligned figure of a row: `M +41 −3`, `?`, `↑`, or a collapsed folder's count. */
+function rowStatus(r: FileRow): string {
+  if (r.isDir) return r.opaque ? (r.letter ?? '') : String(r.count)
+  if (r.letter) {
+    return [r.letter, r.add > 0 ? `+${r.add}` : '', r.del > 0 ? `−${r.del}` : ''].filter(part => part !== '').join(' ')
+  }
+  return r.unpushed ? '↑' : ''
+}
+
 async function open($: EngineInterface): Promise<void> {
   const opened = await $.ui.open({ id: PANE, title: 'Sidebar', columns: WANT_COLUMNS })
   if (!opened.isPlaced) $.ui.toast(`sidebar: ${opened.reason}`)
@@ -334,6 +659,8 @@ function startTick($: EngineInterface): void {
   tick = $.clock.every(TICK_MS, () => {
     void refresh($)
     void prune($)
+    void pruneActivity($)
+    void refreshFiles($)
   })
 }
 
@@ -354,6 +681,7 @@ export const register: Register = on => {
     if (isOn) {
       void refresh($)
       void refreshPlace($)
+      void refreshFiles($)
       void reconcileRuns($)
       startTick($)
       const isUp = (await $.ui.panes()).some(p => p.id === PANE)
@@ -371,6 +699,7 @@ export const register: Register = on => {
     if (want) {
       await refresh($)
       await refreshPlace($)
+      await refreshFiles($)
       startTick($)
       await open($)
       return { text: 'Sidebar open.' }
@@ -439,6 +768,7 @@ export const register: Register = on => {
       const m = e.permission_mode ?? null
       if (m !== (await read($, mode))) await update($, mode, () => m)
       void refreshPlace($)
+      void refreshFiles($)
     }
     return next(e)
   })
@@ -489,6 +819,30 @@ export const register: Register = on => {
     return ran
   })
 
+  // Files the session reads and writes: marked before the tool runs so the mark shows while it works.
+  on('tool.call', { tool: 'Read' }, async ($, e, next) => {
+    await markActivity($, e.file_path, 'read')
+    return next(e)
+  })
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
+    await markActivity($, e.file_path, 'write')
+    const ran = await next(e)
+    await refreshFilesIfOn($)
+    return ran
+  })
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+    await markActivity($, e.file_path, 'write')
+    const ran = await next(e)
+    await refreshFilesIfOn($)
+    return ran
+  })
+  on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => {
+    await markActivity($, e.notebook_path, 'write')
+    const ran = await next(e)
+    await refreshFilesIfOn($)
+    return ran
+  })
+
   // The same through the cfn command line.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const ask = parseCfnAsk(e.command)
@@ -499,6 +853,7 @@ export const register: Register = on => {
       await endRun($, e.tool_use_id, ran.isError ? 'failed' : 'done')
       await tally($, ask.model, 0, true)
     }
+    await refreshFilesIfOn($)
     return ran
   })
 
@@ -512,6 +867,8 @@ export const register: Register = on => {
     const level = await read($, effort)
     const permission = await read($, mode)
     const here = await read($, place)
+    const filesNow = await read($, files)
+    const marks = await read($, activity)
     const tallies = Object.entries(await read($, byModel)).sort((a, b) => b[1].tokens - a[1].tokens || b[1].calls - a[1].calls)
     const topTokens = Math.max(1, ...tallies.map(([, t]) => t.tokens))
     const { Box, Text } = $.ui.resolve(e)
@@ -534,6 +891,9 @@ export const register: Register = on => {
     const nameWidth = width - 2 - 6 // mark + space, then a right-aligned 5-wide token figure after a space
     const barWidth = Math.max(6, width - 3 - 1 - 7) // label(2) + space, bar, space, pct(6)
     const runLabelWidth = Math.max(4, width - 2 - 1 - 7) // mark + space, label, space, elapsed(6)
+
+    const tree = filesNow ? buildRows(filesNow, marks) : null
+    const changed = filesNow ? Object.values(filesNow.status).filter(st => gitMark(st.xy) !== null).length : 0
 
     return (
       <Box flexDirection="column">
@@ -727,6 +1087,45 @@ export const register: Register = on => {
             </Box>
           )
         })}
+
+        {filesNow && tree && (
+          <Box key="files" flexDirection="column" marginTop={1}>
+            <Box key="files-head" gap={1}>
+              <Text bold>FILES</Text>
+              {filesNow.isRepo ? (
+                <>
+                  {filesNow.branch && <Text color="ide" wrap="truncate">{filesNow.branch}</Text>}
+                  {filesNow.ahead > 0 && <Text color="permission">↑{filesNow.ahead}</Text>}
+                  {filesNow.behind > 0 && <Text color="warning">↓{filesNow.behind}</Text>}
+                  <Text dimColor>· {changed > 0 ? `${changed} changed` : 'clean'}</Text>
+                </>
+              ) : (
+                <Text dimColor>not a git repo</Text>
+              )}
+            </Box>
+            {tree.rows.map(r => {
+              const { color, dim } = rowColor(r)
+              const status = rowStatus(r)
+              const nameWidth = Math.max(1, width - 2 * r.depth - 2 - (r.isDir ? 2 : 0) - (status === '' ? 0 : status.length + 1))
+              return (
+                <Box key={`file-${r.path}`}>
+                  {r.depth > 0 && <Text>{'  '.repeat(r.depth)}</Text>}
+                  {r.mark ? <Text color={r.mark === 'write' ? 'claude' : READ_COLOR}>{r.mark === 'write' ? '◆ ' : '◇ '}</Text> : <Text>{'  '}</Text>}
+                  {r.isDir && <Text dimColor>{r.expanded ? '▾ ' : '▸ '}</Text>}
+                  <Text color={color} dimColor={dim} wrap="truncate">
+                    {fit(r.name, nameWidth)}{status === '' ? '' : ' '}
+                  </Text>
+                  {status !== '' && (
+                    <Text color={r.isDir ? 'text' : color} dimColor={r.isDir || dim}>
+                      {status}
+                    </Text>
+                  )}
+                </Box>
+              )
+            })}
+            {tree.more > 0 && <Text dimColor>… {tree.more} more</Text>}
+          </Box>
+        )}
       </Box>
     )
   })

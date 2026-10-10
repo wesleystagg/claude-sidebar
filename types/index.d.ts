@@ -70,6 +70,34 @@ export type AgentRow = {
   currentTool?: string
 }
 
+/** A file the session is reading or writing right now; the mark fades after its last event. */
+export type Activity = {
+  kind: 'read' | 'write'
+  at: number
+}
+
+/** The git picture of the working directory. Paths are POSIX, relative to `root`. */
+export type FilesState = {
+  /** The repo root, or the working directory outside a repo. */
+  root: string
+  isRepo: boolean
+  branch?: string
+  ahead: number
+  behind: number
+  hasUpstream: boolean
+  /** Every tracked path (outside a repo: the files at the top level). */
+  tracked: string[]
+  /** Top-level folders, collapsed, outside a repo only. */
+  plainDirs?: string[]
+  /** Porcelain `XY` per path; a path ending `/` is a whole untracked or ignored folder. */
+  status: Record<string, { xy: string }>
+  /** Lines added and deleted per path, unstaged and staged summed. */
+  numstat: Record<string, { add: number; del: number }>
+  /** Files committed but not pushed to the upstream. */
+  unpushed: string[]
+  takenAt: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     sidebar: {
@@ -85,6 +113,8 @@ declare module 'claude-code' {
       mode: string | null
       place: Place | null
       byModel: Record<string, ModelTally>
+      files: FilesState | null
+      activity: Record<string, Activity>
     }
   }
 }
