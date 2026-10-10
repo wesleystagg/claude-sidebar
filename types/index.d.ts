@@ -76,6 +76,14 @@ export type Activity = {
   at: number
 }
 
+/** One entry of a folder listed from disk; `mtimeMs` is 0 for anything but a regular file. */
+export type ListedEntry = {
+  name: string
+  kind: 'file' | 'dir' | 'other'
+  mtimeMs: number
+  isLink: boolean
+}
+
 /** The git picture of the working directory. Paths are POSIX, relative to `root`. */
 export type FilesState = {
   /** The repo root, or the working directory outside a repo. */
@@ -85,10 +93,12 @@ export type FilesState = {
   ahead: number
   behind: number
   hasUpstream: boolean
-  /** Every tracked path (outside a repo: the files at the top level). */
+  /** The upstream branch, `origin/main`, when the branch has one. */
+  upstream?: string
+  /** Every tracked path (outside a repo: none). */
   tracked: string[]
-  /** Top-level folders, collapsed, outside a repo only. */
-  plainDirs?: string[]
+  /** Disk listings by folder path relative to `root` (`''` is the root): the root and every expanded folder. */
+  listed?: Record<string, ListedEntry[]>
   /** Porcelain `XY` per path; a path ending `/` is a whole untracked or ignored folder. */
   status: Record<string, { xy: string }>
   /** Lines added and deleted per path, unstaged and staged summed. */
@@ -115,6 +125,8 @@ declare module 'claude-code' {
       byModel: Record<string, ModelTally>
       files: FilesState | null
       activity: Record<string, Activity>
+      /** Whether FILES draws Nerd Font glyphs, as resolved at session start from the `glyphs` setting. */
+      nerd: boolean
     }
   }
 }

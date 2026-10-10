@@ -17,5 +17,18 @@
     "context",
     "usage",
     "agents"
-  ]
+  ],
+  "userConfig": {
+    "glyphs": {
+      "type": "string",
+      "title": "Glyphs",
+      "description": "auto uses Nerd Font icons when one is installed here; nerd always; plain uses Unicode only",
+      "default": "auto",
+      "options": [
+        "auto",
+        "nerd",
+        "plain"
+      ]
+    }
+  }
 }

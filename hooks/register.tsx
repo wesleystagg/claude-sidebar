@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface, Timer } from 'claude-code'
 
-import type { Activity, AgentRow, Compactions, FilesState, ModelTally, Place, Sample, Segment, Snapshot, Window } from '../types'
+import type { Activity, AgentRow, Compactions, FilesState, ListedEntry, ModelTally, Place, Sample, Segment, Snapshot, Window } from '../types'
 
 const STORE_KEY = 'enabled'
 const COMMAND = 'sidebar'
 const PANE = 'sidebar'
-const WANT_COLUMNS = 44
+const WANT_COLUMNS = 60
 const TICK_MS = 60_000
 const MAX_AGENT_ROWS = 12
 /** A finished run's row fades this long after it ended; running rows always stay. */
@@ -22,8 +22,26 @@ const ACTIVITY_MS = 45_000
 const FILES_MIN_GAP_MS = 1000
 /** Rows of the FILES tree drawn; the rest collapse into a `… N more` line. */
 const FILES_MAX_ROWS = 40
-/** The read mark's color: a hex, since no theme key is purple. */
-const READ_COLOR = '#7F77DD'
+/** FILES palette: fixed hexes, so the tree reads the same in every theme. */
+const WRITE_COLOR = '#f97316'
+const READ_COLOR = '#c084fc'
+const MUTED = '#808a96'
+const ACCENT = '#5b9bd5'
+const ADD_COLOR = '#98c379'
+const DEL_COLOR = '#e06c75'
+const AHEAD_COLOR = '#2dd4bf'
+const BEHIND_COLOR = '#60a5fa'
+const GIT_COLOR: Record<string, string> = {
+  M: '#e5c07b',
+  T: '#e5c07b',
+  A: '#98c379',
+  '?': '#98c379',
+  R: '#61afef',
+  C: '#61afef',
+  D: '#d0605e',
+  U: '#d0605e',
+}
+const COUNT_COLOR = { n: '#98c379', m: '#e5c07b', d: '#d0605e' } as const
 
 const enabled = atom({ plugin: 'sidebar', key: 'enabled' } as const, false)
 const snapshot = atom({ plugin: 'sidebar', key: 'snapshot' } as const, null)
@@ -38,6 +56,7 @@ const place = atom({ plugin: 'sidebar', key: 'place' } as const, null)
 const byModel = atom({ plugin: 'sidebar', key: 'byModel' } as const, {})
 const files = atom({ plugin: 'sidebar', key: 'files' } as const, null)
 const activity = atom({ plugin: 'sidebar', key: 'activity' } as const, {})
+const nerd = atom({ plugin: 'sidebar', key: 'nerd' } as const, false)
 
 const GLYPH: Record<Segment['kind'], string> = { used: '█', buffer: '▒', free: '░', deferred: '' }
 const MARK: Record<Segment['kind'], string> = { used: '■', buffer: '▒', free: '░', deferred: '' }
@@ -345,9 +364,9 @@ function gitMark(xy: string): GitMark | null {
   return other === ' ' ? null : { letter: other, staged: false }
 }
 
-function parseStatus(out: string): Pick<FilesState, 'branch' | 'ahead' | 'behind' | 'hasUpstream' | 'status'> {
+function parseStatus(out: string): Pick<FilesState, 'branch' | 'upstream' | 'ahead' | 'behind' | 'hasUpstream' | 'status'> {
   const status: Record<string, { xy: string }> = {}
-  const result: Pick<FilesState, 'branch' | 'ahead' | 'behind' | 'hasUpstream' | 'status'> = { ahead: 0, behind: 0, hasUpstream: false, status }
+  const result: Pick<FilesState, 'branch' | 'upstream' | 'ahead' | 'behind' | 'hasUpstream' | 'status'> = { ahead: 0, behind: 0, hasUpstream: false, status }
   const fields = out.split('\0')
   for (let i = 0; i < fields.length; i += 1) {
     const f = fields[i] ?? ''
@@ -357,6 +376,8 @@ function parseStatus(out: string): Pick<FilesState, 'branch' | 'ahead' | 'behind
       const counts = /\[([^\]]*)\]\s*$/.exec(line)
       const head = (counts ? line.slice(0, counts.index) : line).trim()
       result.hasUpstream = head.includes('...')
+      const upstream = head.split('...')[1]
+      if (upstream) result.upstream = upstream
       const name = (head.split('...')[0] ?? head).replace(/^(?:No commits yet on|Initial commit on) /, '').replace(/ \(no branch\)$/, '')
       if (name !== '') result.branch = name
       result.ahead = Number(/ahead (\d+)/.exec(counts?.[1] ?? '')?.[1] ?? 0)
@@ -412,20 +433,78 @@ let filesRun: Promise<void> | null = null
 let filesDoneAt: number | null = null
 let filesRetry = false
 
+/** Every folder holding a flagged path (git change, unpushed or session activity): the ones the tree draws open. */
+function expandedDirs(status: Record<string, { xy: string }>, unpushed: string[], marks: Record<string, Activity>): Set<string> {
+  const flagged = [...Object.entries(status).filter(([, s]) => s.xy !== '!!').map(([path]) => path), ...unpushed, ...Object.keys(marks)]
+  const open = new Set<string>()
+  for (const path of flagged) {
+    const parts = path.split('/').filter(part => part !== '')
+    for (let i = 1; i < parts.length; i += 1) open.add(parts.slice(0, i).join('/'))
+  }
+  return open
+}
+
+/** One folder from disk (`dir` relative to `root`, `''` the root itself); null when it cannot be read. */
+async function listDir($: EngineInterface, root: string, dir: string): Promise<ListedEntry[] | null> {
+  try {
+    const entries = await $.fs.list(dir === '' ? root : `${root}/${dir}`)
+    return entries.map(en => ({ name: en.name, kind: en.kind, mtimeMs: en.mtimeMs, isLink: en.isLink }))
+  } catch {
+    return null
+  }
+}
+
+async function listDirs($: EngineInterface, root: string, dirs: string[]): Promise<Record<string, ListedEntry[]>> {
+  const got = await Promise.all(dirs.map(async dir => [dir, await listDir($, root, dir)] as const))
+  const listed: Record<string, ListedEntry[]> = {}
+  for (const [dir, entries] of got) if (entries) listed[dir] = entries
+  return listed
+}
+
+/** Where Nerd Fonts are installed, tried in turn; the home folder comes from HOME or the working directory. */
+async function hasNerdFont($: EngineInterface): Promise<boolean> {
+  let home = ''
+  try {
+    home = (await $.env.get('HOME')) ?? ''
+  } catch {
+    // No environment to read: fall back to the working directory below.
+  }
+  if (home === '') {
+    const cwd = await $.session.cwd()
+    home = /^\/(?:Users|home)\/[^/]+/.exec(cwd)?.[0] ?? ''
+  }
+  const dirs = [`${home}/Library/Fonts`, '/Library/Fonts', `${home}/.local/share/fonts`, `${home}/.fonts`]
+  for (const dir of dirs) {
+    try {
+      const entries = await $.fs.list(dir)
+      if (entries.some(en => en.name.toLowerCase().includes('nerd'))) return true
+    } catch {
+      // A missing or unreadable folder just has no font in it.
+    }
+  }
+  return false
+}
+
+/** Settles whether FILES draws Nerd Font glyphs: the setting, or for `auto` whether one is installed. */
+async function resolveGlyphs($: EngineInterface, setting: unknown): Promise<void> {
+  const want = setting === 'nerd' ? true : setting === 'plain' ? false : await hasNerdFont($)
+  await update($, nerd, () => want)
+}
+
 async function gatherFiles($: EngineInterface): Promise<void> {
   try {
     const [cwd, repo] = await Promise.all([$.session.cwd(), $.session.repo()])
     const takenAt = await $.clock.now()
     if (!repo) {
-      const entries = await $.fs.list(cwd)
+      const listed = await listDirs($, cwd, [''])
       await update($, files, () => ({
         root: cwd,
         isRepo: false,
         ahead: 0,
         behind: 0,
         hasUpstream: false,
-        tracked: entries.filter(en => en.kind === 'file').map(en => en.name),
-        plainDirs: entries.filter(en => en.kind === 'dir').map(en => en.name),
+        tracked: [],
+        listed,
         status: {},
         numstat: {},
         unpushed: [],
@@ -446,15 +525,12 @@ async function gatherFiles($: EngineInterface): Promise<void> {
     const numstat: Record<string, { add: number; del: number }> = {}
     parseNumstat(unstagedOut ?? '', numstat)
     parseNumstat(stagedOut ?? '', numstat)
-    const next: FilesState = {
-      root,
-      isRepo: true,
-      ...parseStatus(statusOut ?? ''),
-      tracked: splitNul(listOut),
-      numstat,
-      unpushed: splitNul(unpushedOut),
-      takenAt,
-    }
+    const parsed = parseStatus(statusOut ?? '')
+    const unpushed = splitNul(unpushedOut)
+    // The folders the tree will draw open, from git and live activity, are the ones read from disk.
+    const live = Object.fromEntries(Object.entries(await read($, activity)).filter(([, m]) => takenAt - m.at < ACTIVITY_MS))
+    const listed = await listDirs($, root, ['', ...expandedDirs(parsed.status, unpushed, live)])
+    const next: FilesState = { root, isRepo: true, ...parsed, tracked: splitNul(listOut), listed, numstat, unpushed, takenAt }
     await update($, files, () => next)
   } catch {
     // No session bound yet: keep the last drawing.
@@ -517,7 +593,15 @@ async function pruneActivity($: EngineInterface): Promise<void> {
   })
 }
 
-type TreeNode = { name: string; path: string; isDir: boolean; kids: Map<string, TreeNode>; opaque?: 'ignored' | 'untracked' | 'plain' }
+type TreeNode = {
+  name: string
+  path: string
+  isDir: boolean
+  kids: Map<string, TreeNode>
+  opaque?: 'ignored' | 'untracked'
+  mtimeMs?: number
+  isLink?: boolean
+}
 
 type FileRow = {
   path: string
@@ -525,16 +609,41 @@ type FileRow = {
   depth: number
   isDir: boolean
   expanded: boolean
+  isLink: boolean
+  mtimeMs: number | undefined
   mark: 'read' | 'write' | null
   letter: string | null
-  staged: boolean
+  /** A file's own lines; a folder's, summed over everything beneath it. */
   add: number
   del: number
-  unpushed: boolean
   ignored: boolean
   opaque?: TreeNode['opaque']
-  /** A collapsed folder's right-hand figure: the files inside it. */
-  count: number
+  /** A folder's files beneath it that are new, modified and deleted. */
+  newN: number
+  modN: number
+  delN: number
+}
+
+type Roll = { add: number; del: number; newN: number; modN: number; delN: number }
+
+/** Lines and file counts of everything git flags at or under `prefix` (`''` is the whole repo). */
+function rollUp(state: FilesState, prefix: string): Roll {
+  const roll: Roll = { add: 0, del: 0, newN: 0, modN: 0, delN: 0 }
+  const under = (path: string): boolean => prefix === '' || path.startsWith(`${prefix}/`)
+  for (const [path, stat] of Object.entries(state.numstat)) {
+    if (!under(path)) continue
+    roll.add += stat.add
+    roll.del += stat.del
+  }
+  for (const [path, s] of Object.entries(state.status)) {
+    if (!under(path) || s.xy === '!!') continue
+    const letter = s.xy === '??' ? '?' : gitMark(s.xy)?.letter
+    if (!letter) continue
+    if (letter === 'A' || letter === '?') roll.newN += 1
+    else if (letter === 'D' || letter === 'U') roll.delN += 1
+    else roll.modN += 1
+  }
+  return roll
 }
 
 function addNode(root: TreeNode, path: string, opaque?: TreeNode['opaque']): void {
@@ -552,39 +661,36 @@ function addNode(root: TreeNode, path: string, opaque?: TreeNode['opaque']): voi
   })
 }
 
+function findNode(root: TreeNode, path: string): TreeNode | null {
+  let node: TreeNode | undefined = root
+  for (const part of path.split('/').filter(p => p !== '')) node = node?.kids.get(part)
+  return node ?? null
+}
+
 /** The pruned tree as drawn rows: folders open only where a flagged file sits below them. */
 function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: FileRow[]; more: number } {
-  const unpushed = new Set(state.unpushed)
   const root: TreeNode = { name: '', path: '', isDir: true, kids: new Map() }
   for (const path of state.tracked) addNode(root, path)
-  for (const dir of state.plainDirs ?? []) addNode(root, dir, 'plain')
   for (const [path, s] of Object.entries(state.status)) {
     if (path.endsWith('/')) addNode(root, path, s.xy === '!!' ? 'ignored' : 'untracked')
     else addNode(root, path)
   }
   for (const path of Object.keys(marks)) addNode(root, path)
-
-  const flaggedFile = (path: string): boolean => {
-    const xy = state.status[path]?.xy
-    return (xy !== undefined && xy !== '!!') || unpushed.has(path) || marks[path] !== undefined
-  }
-  const countFlagged = (node: TreeNode): number => {
-    let n = 0
-    for (const kid of node.kids.values()) {
-      if (kid.opaque) n += kid.opaque === 'untracked' ? 1 : 0
-      else if (kid.isDir) n += countFlagged(kid)
-      else if (flaggedFile(kid.path)) n += 1
+  // The disk listing adds what git does not name (dot entries, clean folders) and carries the times.
+  for (const [dir, entries] of Object.entries(state.listed ?? {})) {
+    const node = findNode(root, dir)
+    if (!node?.isDir) continue
+    for (const en of entries) {
+      let kid = node.kids.get(en.name)
+      if (!kid) {
+        kid = { name: en.name, path: dir === '' ? en.name : `${dir}/${en.name}`, isDir: en.kind === 'dir', kids: new Map() }
+        node.kids.set(en.name, kid)
+      }
+      if (en.kind === 'file') kid.mtimeMs = en.mtimeMs
+      if (en.isLink) kid.isLink = true
     }
-    return n
   }
-  const countFiles = (node: TreeNode): number => {
-    let n = 0
-    for (const kid of node.kids.values()) {
-      if (kid.opaque) continue
-      n += kid.isDir ? countFiles(kid) : 1
-    }
-    return n
-  }
+  const expanded = expandedDirs(state.status, state.unpushed, marks)
 
   const rows: FileRow[] = []
   const walk = (node: TreeNode, depth: number): void => {
@@ -592,7 +698,21 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
       (a, b) => Number(b.isDir) - Number(a.isDir) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     )
     for (const kid of kids) {
-      const base = { path: kid.path, name: kid.name, depth, mark: null, letter: null, staged: false, add: 0, del: 0, unpushed: false, ignored: false, count: 0 }
+      const base = {
+        path: kid.path,
+        name: kid.name,
+        depth,
+        isLink: kid.isLink === true,
+        mtimeMs: kid.mtimeMs,
+        mark: null,
+        letter: null,
+        add: 0,
+        del: 0,
+        ignored: false,
+        newN: 0,
+        modN: 0,
+        delN: 0,
+      }
       if (!kid.isDir) {
         const xy = state.status[kid.path]?.xy
         const git = xy === undefined ? null : gitMark(xy)
@@ -603,17 +723,16 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
           expanded: false,
           mark: marks[kid.path]?.kind ?? null,
           letter: git?.letter ?? null,
-          staged: git?.staged ?? false,
           add: stat?.add ?? 0,
           del: stat?.del ?? 0,
-          unpushed: unpushed.has(kid.path),
           ignored: xy === '!!',
         })
       } else if (kid.opaque) {
         rows.push({ ...base, isDir: true, expanded: false, opaque: kid.opaque, ignored: kid.opaque === 'ignored', letter: kid.opaque === 'untracked' ? '?' : null })
       } else {
-        const open = countFlagged(kid) > 0
-        rows.push({ ...base, isDir: true, expanded: open, count: open ? 0 : countFiles(kid) })
+        const open = expanded.has(kid.path)
+        const roll = state.isRepo ? rollUp(state, kid.path) : { add: 0, del: 0, newN: 0, modN: 0, delN: 0 }
+        rows.push({ ...base, isDir: true, expanded: open, ...roll })
         if (open) walk(kid, depth + 1)
       }
     }
@@ -622,26 +741,114 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
   return { rows: rows.slice(0, FILES_MAX_ROWS), more: Math.max(0, rows.length - FILES_MAX_ROWS) }
 }
 
-/** The color of a row's name and letter: activity, then git state, then plain. */
-function rowColor(r: FileRow): { color: string; dim: boolean } {
-  if (r.mark === 'write') return { color: 'claude', dim: false }
-  if (r.mark === 'read') return { color: READ_COLOR, dim: false }
-  if (r.ignored) return { color: 'text', dim: true }
-  if (r.isDir) return { color: 'text', dim: r.opaque === 'untracked' }
-  if (r.letter === 'D') return { color: 'error', dim: false }
-  if (r.letter === '?') return { color: 'text', dim: true }
-  if (r.letter) return { color: r.staged ? 'success' : 'warning', dim: false }
-  if (r.unpushed) return { color: 'permission', dim: false }
-  return { color: 'text', dim: false }
+/** The colour of a row's icon and name: activity, then git state, then muted for dot and ignored; undefined is the terminal's own. */
+function rowTone(r: FileRow): string | undefined {
+  if (r.mark === 'write') return WRITE_COLOR
+  if (r.mark === 'read') return READ_COLOR
+  if (r.letter) return GIT_COLOR[r.letter]
+  if (r.ignored || r.name.startsWith('.')) return MUTED
+  return undefined
 }
 
-/** The right-aligned figure of a row: `M +41 −3`, `?`, `↑`, or a collapsed folder's count. */
-function rowStatus(r: FileRow): string {
-  if (r.isDir) return r.opaque ? (r.letter ?? '') : String(r.count)
-  if (r.letter) {
-    return [r.letter, r.add > 0 ? `+${r.add}` : '', r.del > 0 ? `−${r.del}` : ''].filter(part => part !== '').join(' ')
+const FILE_ICON_NAMES: Record<string, number> = {
+  'agents.md': 0xf0354,
+  'changelog.md': 0xf0354,
+  'contributing.md': 0xf0354,
+  'todo.md': 0xf0354,
+  'readme.md': 0xf0354,
+  license: 0xe60a,
+  dockerfile: 0xf0868,
+  makefile: 0xf1064,
+  'cmakelists.txt': 0xf1064,
+  justfile: 0xf05b7,
+  gemfile: 0xf0d2d,
+  rakefile: 0xf0d2d,
+  'cargo.toml': 0xe6b2,
+  'cargo.lock': 0xe6b2,
+  'pyproject.toml': 0xe6b2,
+  'requirements.txt': 0xf160e,
+  'go.mod': 0xf0afa,
+  'go.sum': 0xf07d3,
+  'package.json': 0xf0626,
+  'package-lock.json': 0xf0626,
+  'tsconfig.json': 0xf0626,
+  '.prettierrc': 0xf0626,
+  '.eslintrc': 0xf0626,
+  'pnpm-lock.yaml': 0xe6a8,
+  'yarn.lock': 0xe6a8,
+  '.gitignore': 0xf02a2,
+  '.gitmodules': 0xf0493,
+  '.editorconfig': 0xe652,
+}
+
+const FILE_ICON_EXTS: Record<string, number> = {
+  lua: 0xe620, py: 0xe606, pyi: 0xe606, js: 0xe60c, mjs: 0xe60c, cjs: 0xe60c, ts: 0xe628, jsx: 0xe625, tsx: 0xe7ba,
+  json: 0xe60b, jsonc: 0xe60b, yaml: 0xe6a8, yml: 0xe6a8, sh: 0xe795, bash: 0xe795, zsh: 0xe795, fish: 0xe795,
+  md: 0xf0354, markdown: 0xf0354, css: 0xe6b8, scss: 0xf031c, html: 0xe736, htm: 0xe736, go: 0xe627, rs: 0xe68b,
+  rb: 0xe791, php: 0xe608, java: 0xe738, cs: 0xf031b, sql: 0xe706, graphql: 0xf20e, gql: 0xf20e, xml: 0xf05c0,
+  toml: 0xe6b2, ini: 0xf0bc2, conf: 0xf0493, pdf: 0xeaeb, svg: 0xf0721, jpg: 0xf0225, jpeg: 0xf0225, png: 0xe60d,
+  gif: 0xf0d78, webp: 0xf021f, mp4: 0xf022b, mkv: 0xf022b, mov: 0xf022b, mp3: 0xf0223, wav: 0xf0223, flac: 0xf0223,
+  zip: 0xf05c4, gz: 0xf05c4, xz: 0xf05c4, tar: 0xf05c4, qml: 0xf375, cpp: 0xe61d, cc: 0xe61d, cxx: 0xe61d, c: 0xe61e,
+  h: 0xf0af5, hpp: 0xf0af5, vue: 0xe6a0, svelte: 0xe697, csv: 0xe64a, txt: 0xf09aa,
+}
+
+/** The chevron of a folder row, without its trailing space. */
+function chevronGlyph(open: boolean, nerdOn: boolean): string {
+  if (!nerdOn) return open ? '▾' : '▸'
+  return String.fromCodePoint(open ? 0xf47c : 0xf460)
+}
+
+/** The icon of a row, without its trailing space: by exact name, then extension, in Nerd mode. */
+function iconGlyph(r: FileRow, nerdOn: boolean): string {
+  if (!nerdOn) return r.isDir ? '■' : '·'
+  if (r.isLink) return String.fromCodePoint(0xf481)
+  if (r.isDir) return String.fromCodePoint(r.expanded ? 0xe5fe : 0xe5ff)
+  const lower = r.name.toLowerCase()
+  const named = FILE_ICON_NAMES[lower]
+  if (named) return String.fromCodePoint(named)
+  const dot = lower.lastIndexOf('.')
+  const ext = dot >= 0 ? lower.slice(dot + 1) : ''
+  return String.fromCodePoint(FILE_ICON_EXTS[ext] ?? 0xf0214)
+}
+
+type Seg = { t: string; color?: string; bold?: boolean }
+
+/** ` YYYY-MM-DD HH:MM` in local time, or nothing when the time is unknown. */
+function fmtStamp(ms: number | undefined): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const two = (n: number): string => String(n).padStart(2, '0')
+  return ` ${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`
+}
+
+function lineSegs(add: number, del: number): Seg[] {
+  const segs: Seg[] = []
+  if (add > 0) segs.push({ t: ` +${add}`, color: ADD_COLOR })
+  if (del > 0) segs.push({ t: ` -${del}`, color: DEL_COLOR })
+  return segs
+}
+
+function countSegs(roll: Roll): Seg[] {
+  const segs: Seg[] = []
+  if (roll.newN > 0) segs.push({ t: ` N:${roll.newN}`, color: COUNT_COLOR.n })
+  if (roll.modN > 0) segs.push({ t: ` M:${roll.modN}`, color: COUNT_COLOR.m })
+  if (roll.delN > 0) segs.push({ t: ` D:${roll.delN}`, color: COUNT_COLOR.d })
+  return segs
+}
+
+/** The right-hand column of a row: lines or time, then the badge (a file) or the counts (a folder). */
+function rowRight(r: FileRow, nerdOn: boolean): Seg[] {
+  const ignoredBadge: Seg = { t: nerdOn ? ` ${String.fromCodePoint(0xf05e)}` : ' ⊘', color: MUTED }
+  if (r.isDir) {
+    if (r.opaque === 'ignored') return [ignoredBadge]
+    if (r.opaque === 'untracked') return [{ t: ' ?', color: GIT_COLOR['?'], bold: true }]
+    return [...lineSegs(r.add, r.del), ...countSegs(r)]
   }
-  return r.unpushed ? '↑' : ''
+  const segs: Seg[] = r.add > 0 || r.del > 0 ? lineSegs(r.add, r.del) : fmtStamp(r.mtimeMs) === '' ? [] : [{ t: fmtStamp(r.mtimeMs), color: MUTED }]
+  if (r.letter) segs.push({ t: ` ${r.letter}`, color: GIT_COLOR[r.letter], bold: true })
+  else if (r.ignored) segs.push(ignoredBadge)
+  else segs.push({ t: '  ' })
+  return segs
 }
 
 async function open($: EngineInterface): Promise<void> {
@@ -669,7 +876,7 @@ function stopTick(): void {
   tick = null
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: COMMAND,
@@ -678,6 +885,7 @@ export const register: Register = on => {
     })
     const isOn = (await $.store.get(STORE_KEY)) === true
     await update($, enabled, () => isOn)
+    await resolveGlyphs($, options.glyphs)
     if (isOn) {
       void refresh($)
       void refreshPlace($)
@@ -697,6 +905,7 @@ export const register: Register = on => {
     await $.store.set(STORE_KEY, want)
     await update($, enabled, () => want)
     if (want) {
+      await resolveGlyphs($, options.glyphs)
       await refresh($)
       await refreshPlace($)
       await refreshFiles($)
@@ -869,6 +1078,7 @@ export const register: Register = on => {
     const here = await read($, place)
     const filesNow = await read($, files)
     const marks = await read($, activity)
+    const nerdOn = options.glyphs === 'nerd' ? true : options.glyphs === 'plain' ? false : await read($, nerd)
     const tallies = Object.entries(await read($, byModel)).sort((a, b) => b[1].tokens - a[1].tokens || b[1].calls - a[1].calls)
     const topTokens = Math.max(1, ...tallies.map(([, t]) => t.tokens))
     const { Box, Text } = $.ui.resolve(e)
@@ -893,7 +1103,7 @@ export const register: Register = on => {
     const runLabelWidth = Math.max(4, width - 2 - 1 - 7) // mark + space, label, space, elapsed(6)
 
     const tree = filesNow ? buildRows(filesNow, marks) : null
-    const changed = filesNow ? Object.values(filesNow.status).filter(st => gitMark(st.xy) !== null).length : 0
+    const repoRoll = filesNow ? rollUp(filesNow, '') : { add: 0, del: 0, newN: 0, modN: 0, delN: 0 }
 
     return (
       <Box flexDirection="column">
@@ -1090,36 +1300,44 @@ export const register: Register = on => {
 
         {filesNow && tree && (
           <Box key="files" flexDirection="column" marginTop={1}>
-            <Box key="files-head" gap={1}>
+            <Box key="files-head" flexDirection="row" gap={1}>
               <Text bold>FILES</Text>
-              {filesNow.isRepo ? (
-                <>
-                  {filesNow.branch && <Text color="ide" wrap="truncate">{filesNow.branch}</Text>}
-                  {filesNow.ahead > 0 && <Text color="permission">↑{filesNow.ahead}</Text>}
-                  {filesNow.behind > 0 && <Text color="warning">↓{filesNow.behind}</Text>}
-                  <Text dimColor>· {changed > 0 ? `${changed} changed` : 'clean'}</Text>
-                </>
-              ) : (
-                <Text dimColor>not a git repo</Text>
-              )}
+              <Text color={ACCENT} wrap="truncate-end">{filesNow.root.split('/').filter(part => part !== '').pop() ?? '/'}</Text>
+              {!filesNow.isRepo && <Text color={MUTED}>not a git repo</Text>}
             </Box>
+            {filesNow.isRepo && (
+              <Box key="files-branch" flexDirection="row" height={1} overflow="hidden">
+                <Box flexShrink={1} overflow="hidden" flexDirection="row">
+                  <Text color={ACCENT}>{`${nerdOn ? String.fromCodePoint(0xe0a0) : '⎇'} `}</Text>
+                  {filesNow.branch && <Text bold wrap="truncate-end">{filesNow.branch}</Text>}
+                  {filesNow.ahead > 0 && <Text color={AHEAD_COLOR}>{` ↑${filesNow.ahead}`}</Text>}
+                  {filesNow.behind > 0 && <Text color={BEHIND_COLOR}>{` ↓${filesNow.behind}`}</Text>}
+                  {filesNow.upstream && <Text color={MUTED} wrap="truncate-end">{` ${filesNow.upstream}`}</Text>}
+                </Box>
+                <Box flexGrow={1} />
+                <Box flexShrink={0} flexDirection="row">
+                  {[...lineSegs(repoRoll.add, repoRoll.del), ...countSegs(repoRoll)].map((g, i) => (
+                    <Text key={`total-${i}`} color={g.color} bold={g.bold}>{g.t}</Text>
+                  ))}
+                  {repoRoll.newN + repoRoll.modN + repoRoll.delN === 0 && <Text color={MUTED}> clean</Text>}
+                </Box>
+              </Box>
+            )}
             {tree.rows.map(r => {
-              const { color, dim } = rowColor(r)
-              const status = rowStatus(r)
-              const nameWidth = Math.max(1, width - 2 * r.depth - 2 - (r.isDir ? 2 : 0) - (status === '' ? 0 : status.length + 1))
+              const tone = rowTone(r)
               return (
-                <Box key={`file-${r.path}`}>
-                  {r.depth > 0 && <Text>{'  '.repeat(r.depth)}</Text>}
-                  {r.mark ? <Text color={r.mark === 'write' ? 'claude' : READ_COLOR}>{r.mark === 'write' ? '◆ ' : '◇ '}</Text> : <Text>{'  '}</Text>}
-                  {r.isDir && <Text dimColor>{r.expanded ? '▾ ' : '▸ '}</Text>}
-                  <Text color={color} dimColor={dim} wrap="truncate">
-                    {fit(r.name, nameWidth)}{status === '' ? '' : ' '}
-                  </Text>
-                  {status !== '' && (
-                    <Text color={r.isDir ? 'text' : color} dimColor={r.isDir || dim}>
-                      {status}
-                    </Text>
-                  )}
+                <Box key={`file-${r.path}`} flexDirection="row" height={1} overflow="hidden">
+                  <Box flexShrink={1} overflow="hidden" flexDirection="row">
+                    <Text color={MUTED}>{`${'  '.repeat(r.depth)}${r.isDir ? chevronGlyph(r.expanded, nerdOn) : ' '} `}</Text>
+                    <Text color={r.isDir ? (tone ?? ACCENT) : tone}>{`${iconGlyph(r, nerdOn)} `}</Text>
+                    <Text color={tone} strikethrough={r.letter === 'D'} wrap="truncate-end">{r.name}</Text>
+                  </Box>
+                  <Box flexGrow={1} />
+                  <Box flexShrink={0} flexDirection="row">
+                    {rowRight(r, nerdOn).map((g, i) => (
+                      <Text key={`${r.path}-${i}`} color={g.color} bold={g.bold}>{g.t}</Text>
+                    ))}
+                  </Box>
                 </Box>
               )
             })}
