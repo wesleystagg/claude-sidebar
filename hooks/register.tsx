@@ -31,6 +31,8 @@ const ADD_COLOR = '#98c379'
 const DEL_COLOR = '#e06c75'
 const AHEAD_COLOR = '#2dd4bf'
 const BEHIND_COLOR = '#60a5fa'
+/** A clean file whose commit has not reached the upstream. */
+const UNPUSHED_COLOR = '#61afef'
 const GIT_COLOR: Record<string, string> = {
   M: '#e5c07b',
   T: '#e5c07b',
@@ -613,6 +615,8 @@ type FileRow = {
   mtimeMs: number | undefined
   mark: 'read' | 'write' | null
   letter: string | null
+  /** Committed but not yet on the upstream, and otherwise clean. */
+  unpushed: boolean
   /** A file's own lines; a folder's, summed over everything beneath it. */
   add: number
   del: number
@@ -669,6 +673,7 @@ function findNode(root: TreeNode, path: string): TreeNode | null {
 
 /** The pruned tree as drawn rows: folders open only where a flagged file sits below them. */
 function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: FileRow[]; more: number } {
+  const unpushed = new Set(state.unpushed)
   const root: TreeNode = { name: '', path: '', isDir: true, kids: new Map() }
   for (const path of state.tracked) addNode(root, path)
   for (const [path, s] of Object.entries(state.status)) {
@@ -706,6 +711,7 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
         mtimeMs: kid.mtimeMs,
         mark: null,
         letter: null,
+        unpushed: false,
         add: 0,
         del: 0,
         ignored: false,
@@ -723,6 +729,7 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
           expanded: false,
           mark: marks[kid.path]?.kind ?? null,
           letter: git?.letter ?? null,
+          unpushed: unpushed.has(kid.path) && git === null,
           add: stat?.add ?? 0,
           del: stat?.del ?? 0,
           ignored: xy === '!!',
@@ -746,6 +753,7 @@ function rowTone(r: FileRow): string | undefined {
   if (r.mark === 'write') return WRITE_COLOR
   if (r.mark === 'read') return READ_COLOR
   if (r.letter) return GIT_COLOR[r.letter]
+  if (r.unpushed) return UNPUSHED_COLOR
   if (r.ignored || r.name.startsWith('.')) return MUTED
   return undefined
 }
@@ -846,6 +854,7 @@ function rowRight(r: FileRow, nerdOn: boolean): Seg[] {
   }
   const segs: Seg[] = r.add > 0 || r.del > 0 ? lineSegs(r.add, r.del) : fmtStamp(r.mtimeMs) === '' ? [] : [{ t: fmtStamp(r.mtimeMs), color: MUTED }]
   if (r.letter) segs.push({ t: ` ${r.letter}`, color: GIT_COLOR[r.letter], bold: true })
+  else if (r.unpushed) segs.push({ t: ' ↑', color: UNPUSHED_COLOR, bold: true })
   else if (r.ignored) segs.push(ignoredBadge)
   else segs.push({ t: '  ' })
   return segs

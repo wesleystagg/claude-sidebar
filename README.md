@@ -51,7 +51,7 @@ FILES claude-sidebar
     · register.tsx                                  +41 -3 M
 ▸ ■ node_modules                                           ⊘
 ▾ ■ types                                                D:1
-    · index.d.ts                          2026-10-09 17:42
+    · index.d.ts                        2026-10-09 17:42 ↑
     · old.d.ts                                             D
   · README.md                                        +6 -1 M
 ```
@@ -136,8 +136,9 @@ modification time. There are no background colours, only coloured text.
   numstat lines for it (staged and unstaged summed), otherwise its time as
   `YYYY-MM-DD HH:MM` in muted text. Then a bold one-letter badge in git's
   colour: `M` modified, `A` added, `D` deleted, `R` renamed, `C` copied,
-  `?` untracked; an unstaged change shows over a staged one. An ignored
-  file shows a muted `⊘` instead, and a clean one nothing.
+  `?` untracked; an unstaged change shows over a staged one. A clean file
+  whose commit has not reached the upstream shows a blue `↑`, an ignored
+  file a muted `⊘`, and any other clean file nothing.
 - **Right-hand column of a folder.** The `+added -deleted` lines beneath
   it, then `N:x` new, `M:x` modified and `D:x` deleted files beneath it;
   nothing when there are none. An untracked folder shows `?` like a file,
@@ -148,7 +149,8 @@ modification time. There are no background colours, only coloured text.
   starts until 45 seconds after the last event (subagents' calls count; a
   write replaces a read, and a later read does not downgrade a live write).
   Otherwise git's colour applies: amber modified, green added or untracked,
-  blue renamed or copied, red deleted (the name also struck through).
+  blue renamed or copied, red deleted (the name also struck through), and
+  a lighter blue for a clean file that is committed but not pushed.
   Dot-files, dot-folders, ignored entries, chevrons and times are muted
   grey; folder icons and the header's folder name are blue; anything else
   uses the terminal's own text colour.
