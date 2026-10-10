@@ -465,3 +465,80 @@ test('FILES outside a repo lists the top level and says so', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /^⎇ $/ })).toBeUndefined()
   await ui.unmount()
 })
+
+/** The ids of the FILES rows whose name is lit, with the kind of the mark. */
+function litRows(p: { rows: any[] }): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const r of p.rows) {
+    const name = r.left.find((g: any) => g.sh && !g.one)
+    if (name) out[r.id] = name.sh
+  }
+  return out
+}
+
+const SHELL_REAL = ['README.md', 'docs', 'hooks', 'hooks/register.tsx']
+
+/** Boots a repo session where only the `real` repo-relative paths exist; returns the paths `fs.exists` was asked about. */
+async function bootShell($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1], real: string[]) {
+  mock.clock(on, { now: NOW + 7_200_000 })
+  bootFiles(on, true)
+  const asked: string[] = []
+  on('fs.exists', (_, e) => {
+    asked.push(e.path)
+    return { value: real.some(r => e.path === `${ROOT}/${r}`) }
+  })
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+  return asked
+}
+
+test('FILES marks files and folders that shell readers name as read', async ($, on) => {
+  const asked = await bootShell($, on, SHELL_REAL)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b1', command: 'cat README.md' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b2', command: "sed -n '1,40p' hooks/register.tsx" })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b3', command: 'grep -n "foo" hooks/register.tsx docs' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b4', command: "rg --glob '*.ts' pattern hooks" })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b5', command: 'head -n 20 README.md | tail -5' })
+
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const p = await filesProps(ui)
+  expect(litRows(p)).toEqual({ 'README.md': 'read', docs: 'read', hooks: 'read', 'hooks/register.tsx': 'read' })
+  // a folder row takes the read colour on its icon and name
+  const docs = p.rows.find((r: any) => r.id === 'docs')
+  expect(docs.left.find((g: any) => g.t === 'docs')).toMatchObject({ c: '#c084fc', sh: 'read' })
+  expect(docs.left.find((g: any) => g.one)).toMatchObject({ c: '#c084fc', sh: 'read' })
+  // the sed script, grep pattern and rg pattern are candidates that fail the exists check, so none becomes a mark
+  expect(asked).toContain(`${ROOT}/1,40p`)
+  expect(asked).toContain(`${ROOT}/foo`)
+  expect(asked).toContain(`${ROOT}/pattern`)
+  expect(Object.keys(litRows(p)).some(id => /1,40p|foo|pattern/.test(id))).toBe(false)
+  // the glob and the -n values are dropped before any lookup
+  expect(asked.some(a => a.includes('*') || a.endsWith('/20') || a.endsWith('/-5') || a.endsWith('/5'))).toBe(false)
+  await ui.unmount()
+})
+
+test('FILES never lights a reader candidate that does not exist, even a sed script', async ($, on) => {
+  await bootShell($, on, [])
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b6', command: "sed -n '1,40p' hooks/register.tsx" })
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(litRows(await filesProps(ui))).toEqual({})
+  await ui.unmount()
+})
+
+test('FILES resolves shell reads against the session cwd, so a cd inside the command is not followed', async ($, on) => {
+  // `cd hooks && cat register.tsx` names ROOT/register.tsx, which does not exist, so nothing lights.
+  await bootShell($, on, SHELL_REAL)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b7', command: 'cd hooks && cat register.tsx' })
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(litRows(await filesProps(ui))).toEqual({})
+  await ui.unmount()
+})
+
+test('FILES ignores shell writes and paths outside the repo', async ($, on) => {
+  const asked = await bootShell($, on, SHELL_REAL)
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b8', command: 'echo x > README.md' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b9', command: 'cat /etc/hosts ../outside.txt 2>&1 > hooks/register.tsx' })
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(litRows(await filesProps(ui))).toEqual({})
+  expect(asked).toEqual([])
+  await ui.unmount()
+})

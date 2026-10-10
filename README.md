@@ -148,6 +148,11 @@ modification time. There are no background colours, only coloured text.
   reading it, both from when the Read, Write, Edit or NotebookEdit call
   starts until 45 seconds after the last event (subagents' calls count; a
   write replaces a read, and a later read does not downgrade a live write).
+  Files named to shell readers in a Bash call (`cat`, `sed`, `head`, `tail`,
+  `grep`, `rg`, `less`, `bat`, `awk`, `wc`, `diff`, `stat`, `file`, `ls`) are
+  marked as read too, resolved against the working directory and only when they
+  exist; shell writes are not parsed, since the git refresh after the call
+  colours them.
   While a file is marked, a band of light sweeps along its icon and name,
   bright for the first 2.7 seconds and in a dimmer shade for the rest of
   the 45 (orange for a write, purple for a read). When no file is marked
