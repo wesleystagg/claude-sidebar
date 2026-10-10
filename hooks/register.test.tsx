@@ -524,12 +524,13 @@ test('FILES never lights a reader candidate that does not exist, even a sed scri
   await ui.unmount()
 })
 
-test('FILES resolves shell reads against the session cwd, so a cd inside the command is not followed', async ($, on) => {
-  // `cd hooks && cat register.tsx` names ROOT/register.tsx, which does not exist, so nothing lights.
+test('FILES follows a cd inside the command when resolving shell reads', async ($, on) => {
+  // `cd hooks && cat register.tsx` names hooks/register.tsx; an absolute cd to the root resolves the same way.
   await bootShell($, on, SHELL_REAL)
   await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b7', command: 'cd hooks && cat register.tsx' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b8', command: `cd ${ROOT} && head -n 3 README.md` })
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  expect(litRows(await filesProps(ui))).toEqual({})
+  expect(litRows(await filesProps(ui))).toEqual({ 'README.md': 'read', 'hooks/register.tsx': 'read' })
   await ui.unmount()
 })
 

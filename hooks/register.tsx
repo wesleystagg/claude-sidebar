@@ -651,9 +651,16 @@ function shellSegments(command: string): string[][] {
 /** The paths a shell command's reader commands (`cat`, `sed`, `grep`, ...) name, in order and unique; globs and flags are dropped. */
 function readTargets(command: string): string[] {
   const found: string[] = []
+  // A `cd` earlier in the command moves where later relative paths are read from.
+  let dir = ''
   for (const words of shellSegments(command)) {
     let at = 0
     while (at < words.length && (SHELL_PREFIXES.has(words[at]!) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at]!))) at += 1
+    if (words[at] === 'cd') {
+      const to = words[at + 1] ?? '~'
+      dir = to.startsWith('/') || to === '~' || to.startsWith('~/') || dir === '' ? to : `${dir}/${to}`
+      continue
+    }
     const reader = words[at]?.split('/').pop() ?? ''
     if (!SHELL_READERS.has(reader)) continue
     const takesValue = SHELL_OPTION_ARGS[reader] ?? []
@@ -668,7 +675,8 @@ function readTargets(command: string): string[] {
         continue
       }
       if (/[*?[]/.test(w)) continue
-      if (!found.includes(w)) found.push(w)
+      const target = dir === '' || w.startsWith('/') || w === '~' || w.startsWith('~/') ? w : `${dir}/${w}`
+      if (!found.includes(target)) found.push(target)
     }
   }
   return found

@@ -150,7 +150,7 @@ modification time. There are no background colours, only coloured text.
   write replaces a read, and a later read does not downgrade a live write).
   Files named to shell readers in a Bash call (`cat`, `sed`, `head`, `tail`,
   `grep`, `rg`, `less`, `bat`, `awk`, `wc`, `diff`, `stat`, `file`, `ls`) are
-  marked as read too, resolved against the working directory and only when they
+  marked as read too, resolved against the working directory (a `cd` earlier in the command is followed) and only when they
   exist; shell writes are not parsed, since the git refresh after the call
   colours them.
   While a file is marked, a band of light sweeps along its icon and name,
