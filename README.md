@@ -42,15 +42,18 @@ AGENTS 1 running · 84k tok
 ✓ coder-quick                  12s
   haiku-5-5 · Fix typo in README
 
-FILES main ↑1 · 3 changed
-  ▸ docs                                   1
-  ▾ hooks
-  ◆ register.tsx                    M +41 −3
-    register.test.tsx                  A +88
-  ▸ node_modules
-  ▾ types
-  ◇ index.d.ts                             ↑
-  README.md                          M +6 −1
+FILES claude-sidebar
+⎇ main ↑1 origin/main                    +135 -4 N:1 M:2 D:1
+▸ ■ .git
+▸ ■ docs
+▾ ■ hooks                                    +129 -3 N:1 M:1
+    · register.test.tsx                                +88 A
+    · register.tsx                                  +41 -3 M
+▸ ■ node_modules                                           ⊘
+▾ ■ types                                                D:1
+    · index.d.ts                        2026-10-09 17:42 ↑
+    · old.d.ts                                             D
+  · README.md                                        +6 -1 M
 ```
 
 ## Install
@@ -111,33 +114,52 @@ end; the header keeps the session's total burn across all runs.
 
 **FILES.** The working directory as a pruned tree, at the bottom of the
 panel. Folders open (`▾`) only where a file needs your eye; every other folder
-is one collapsed row (`▸`) with the number of files inside it at the right.
-A file is flagged when it has a git change, is committed but not pushed, or
-the session is touching it. Each row is coloured text plus a one-character
-mark, with no background colours:
+is one collapsed row (`▸`). A file is flagged when it has a git change, is
+committed but not pushed, or the session is touching it, and every folder
+above a flagged file is open. Open folders are listed from disk, so dot
+entries such as `.git` appear (collapsed, muted) and every file carries its
+modification time. There are no background colours, only coloured text.
 
-- `◆` (orange) the session is writing the file; `◇` (purple) it is reading
-  it. The mark appears when the Read, Write, Edit or NotebookEdit call
-  starts, so it shows while the tool runs, and fades 45 seconds after the
-  last event. Subagents' calls count too. A write mark replaces a read mark,
-  and a later read does not downgrade a live write mark.
-- The letter at the right is git's state: `M` modified, `A` added, `D`
-  deleted, `R` renamed, `C` copied, `?` untracked, followed by `+added −deleted`
-  lines (staged and unstaged summed). An unstaged change shows over a staged
-  one. `↑` alone marks a clean file that is committed but not yet pushed.
-- The name and letter take the state colour: orange for a write, purple for
-  a read, red deleted, green staged, amber unstaged, blue unpushed, dim for
-  untracked and ignored, plain otherwise.
-- Gitignored entries are shown, dim, not hidden. A fully ignored folder is
-  one collapsed dim row with no count; an untracked folder is one collapsed
-  row marked `?`.
+- **Header.** The first row is `FILES` and the repo folder's name in blue.
+  The second row is the branch (bold) with `↑N` when commits are unpushed,
+  `↓N` when the upstream is ahead, and the upstream (`origin/main`) muted;
+  at the right the whole repo's `+added -deleted` lines and the counts of new
+  (`N:`), modified (`M:`) and deleted (`D:`) files, or a muted `clean`.
+  Outside a git repository the second row is absent, the title row ends with
+  a muted `not a git repo`, and the top level of the working directory is
+  listed with folders collapsed and no git colours or badges.
+- **Glyphs.** With a Nerd Font, folders take the chevron and folder icons
+  and files an icon by name and extension (a symlink its own); without one,
+  `▾`/`▸`, `■` for a folder and `·` for a file. Each glyph is followed by a
+  space. See [Settings](#settings) for how the choice is made.
+- **Right-hand column of a file.** Its `+added -deleted` lines when git has
+  numstat lines for it (staged and unstaged summed), otherwise its time as
+  `YYYY-MM-DD HH:MM` in muted text. Then a bold one-letter badge in git's
+  colour: `M` modified, `A` added, `D` deleted, `R` renamed, `C` copied,
+  `?` untracked; an unstaged change shows over a staged one. A clean file
+  whose commit has not reached the upstream shows a blue `↑`, an ignored
+  file a muted `⊘`, and any other clean file nothing.
+- **Right-hand column of a folder.** The `+added -deleted` lines beneath
+  it, then `N:x` new, `M:x` modified and `D:x` deleted files beneath it;
+  nothing when there are none. An untracked folder shows `?` like a file,
+  and an ignored folder a muted `⊘`.
+- **Colours.** Fixed hexes, so they hold in every theme. A name and its icon
+  are orange while the session is writing the file and purple while it is
+  reading it, both from when the Read, Write, Edit or NotebookEdit call
+  starts until 45 seconds after the last event (subagents' calls count; a
+  write replaces a read, and a later read does not downgrade a live write).
+  Otherwise git's colour applies: amber modified, green added or untracked,
+  blue renamed or copied, red deleted (the name also struck through), and
+  a lighter blue for a clean file that is committed but not pushed.
+  Dot-files, dot-folders, ignored entries, chevrons and times are muted
+  grey; folder icons and the header's folder name are blue; anything else
+  uses the terminal's own text colour.
 - Folders sort before files, each case-insensitive alphabetical. The tree
   draws at most 40 rows and ends with a dim `… N more`.
 
-The header shows `FILES`, the branch, `↑N` when commits are unpushed, `↓N`
-when the upstream is ahead, and `· N changed` (untracked included, ignored
-excluded) or `· clean`. Outside a git repository it reads `not a git repo`
-and lists the top level of the working directory, folders collapsed.
+The icons need a [Nerd Font](https://www.nerdfonts.com/) installed and
+selected as the terminal's font; otherwise the private-use code points draw
+as empty boxes. Set `glyphs` to `plain` to avoid them.
 
 ## How it measures
 
@@ -155,12 +177,27 @@ Everything comes from the Claude Code plugin API, with no extra API calls:
   beside the bar is exact.
 - FILES state comes from git itself (`status`, `ls-files`, `diff --numstat`
   and `diff --name-only @{upstream}..HEAD`), run through the engine with
-  repo hooks off. It is refreshed after Write, Edit, NotebookEdit and Bash
+  repo hooks off, plus a disk listing (the engine's `fs.list`) of the repo
+  root and of every folder the tree draws open, which supplies the
+  modification times and the dot entries that the repo's own file list
+  does not name. It is refreshed after Write, Edit, NotebookEdit and Bash
   calls, on each prompt and once a minute. There is no file watcher, so an
   edit from another terminal shows at the next refresh. Refreshes closer than
   a second apart are folded into one.
 - Workflow agents and cloud-remote agents raise no local events and are not
   tracked.
+
+## Settings
+
+One setting, in `/config` under sidebar:
+
+| Setting | Values | Effect |
+| --- | --- | --- |
+| `glyphs` | `auto` (default), `nerd`, `plain` | `auto` uses Nerd Font icons when a Nerd Font is installed on this machine: at session start (and when the panel is switched on) it looks in `~/Library/Fonts`, `/Library/Fonts`, `~/.local/share/fonts` and `~/.fonts` for a file whose name contains "Nerd". `nerd` always draws them; `plain` uses Unicode only. |
+
+`auto` only sees that a Nerd Font is installed, not that the terminal uses
+it; if the icons draw as boxes, select the font in the terminal or set
+`plain`.
 
 ## Commands
 

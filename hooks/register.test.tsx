@@ -43,7 +43,7 @@ const PANE = {
   props: {
     title: 'Sidebar',
     isFocused: false,
-    bodyColumns: 44,
+    bodyColumns: 60,
     placement: 'dock',
     scroll: { offset: 0, bodyRows: 40 },
     view: {},
@@ -114,7 +114,7 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
     expect(await ui.find({ type: 'Text', text: /deferred/ })).toBeUndefined()
     // the stacked bar spans the pane's full body width
     const bar = (await ui.findAll({ type: 'Text', text: /^[█▒░]+$/ })).slice(0, 5)
-    expect(bar.reduce((sum, t) => sum + t.text.length, 0)).toBe(44)
+    expect(bar.reduce((sum, t) => sum + t.text.length, 0)).toBe(60)
     expect(await ui.find({ type: 'Text', text: /5h/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /23\.5%/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /resets in 2h 10m/ })).toBeDefined()
@@ -246,15 +246,24 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
 
 const ROOT = '/Users/wesley/Projects/claude-sidebar'
 const NUL = '\0'
+const CLEAN_MTIME = Date.parse('2026-03-04T09:05:00Z')
 
 /** A git answer by argv: the status, the tracked list, both numstats and the unpushed set of the FILES fixture. */
 function gitAnswer(argv: readonly string[]): string {
   const line = argv.slice(1).join(' ')
   if (line.startsWith('status')) {
-    return ['## main...origin/main [ahead 1]', ' M hooks/register.tsx', 'A  hooks/register.test.tsx', ' M README.md', '!! node_modules/', ''].join(NUL)
+    return [
+      '## main...origin/main [ahead 1]',
+      ' M hooks/register.tsx',
+      'A  hooks/register.test.tsx',
+      ' M README.md',
+      ' D types/old.d.ts',
+      '!! node_modules/',
+      '',
+    ].join(NUL)
   }
   if (line === 'ls-files -z') {
-    return ['README.md', 'docs/FEEDBACK.md', 'hooks/register.test.tsx', 'hooks/register.tsx', 'types/index.d.ts', ''].join(NUL)
+    return ['README.md', 'docs/FEEDBACK.md', 'hooks/register.test.tsx', 'hooks/register.tsx', 'types/index.d.ts', 'types/old.d.ts', ''].join(NUL)
   }
   if (line === 'diff --numstat -z') return ['41\t3\thooks/register.tsx', '6\t1\tREADME.md', ''].join(NUL)
   if (line === 'diff --numstat --cached -z') return ['88\t0\thooks/register.test.tsx', ''].join(NUL)
@@ -262,20 +271,32 @@ function gitAnswer(argv: readonly string[]): string {
   return ''
 }
 
-/** The mocks every FILES test needs, with git answering from the fixture. */
-function bootFiles(on: Parameters<Parameters<typeof test>[1]>[1], repo: boolean) {
+const file = (name: string, mtimeMs = 0) => ({ name, kind: 'file' as const, size: 10, mtimeMs, isLink: false })
+const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
+
+/** The repo's folders on disk: the root, plus the two expanded folders, with dot entries. */
+function listRepo(path: string) {
+  if (path === ROOT) return [file('README.md', CLEAN_MTIME), dir('.git'), dir('docs'), dir('hooks'), dir('node_modules'), dir('types')]
+  if (path === `${ROOT}/hooks`) return [file('register.test.tsx', CLEAN_MTIME), file('register.tsx', CLEAN_MTIME)]
+  if (path === `${ROOT}/types`) return [file('index.d.ts', CLEAN_MTIME)]
+  return []
+}
+
+/** The mocks every FILES test needs, with git answering from the fixture; `fonts` puts a Nerd Font in the user's font folder. */
+function bootFiles(on: Parameters<Parameters<typeof test>[1]>[1], repo: boolean, fonts = false) {
   mock.store(on)
   on('session.usage', () => ({ value: usage() }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
   on('session.cwd', () => ({ value: repo ? ROOT : '/Users/wesley/scratch' }))
   on('session.repo', () => ({ value: repo ? { root: ROOT, remote: null, internal: false, name: null } : null }))
+  on('env.get', () => ({ value: '/Users/wesley' }))
   on('fs.read', () => ({ value: 'ref: refs/heads/main\n' }))
-  on('fs.list', () => ({
-    value: [
-      { name: 'notes.txt', kind: 'file' as const, size: 10, mtimeMs: 0, isLink: false },
-      { name: 'src', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false },
-    ],
-  }))
+  on('fs.list', (_, e) => {
+    if (e.path === '/Users/wesley/Library/Fonts') return { value: fonts ? [file('JetBrainsMono Nerd Font Regular.ttf')] : [file('Helvetica.ttf')] }
+    if (e.path.toLowerCase().endsWith('fonts')) throw new Error('ENOENT')
+    if (e.path === '/Users/wesley/scratch') return { value: [file('notes.txt', CLEAN_MTIME), dir('src')] }
+    return { value: listRepo(e.path) }
+  })
   on('process.run', (_, e) => ({
     value: { exitCode: 0, stdout: gitAnswer(e.argv), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
@@ -284,47 +305,108 @@ function bootFiles(on: Parameters<Parameters<typeof test>[1]>[1], repo: boolean)
   on('tool.call', () => ({ result: { stdout: 'ok', stderr: '' } }))
 }
 
-test('FILES draws the pruned tree with git letters, numstat and unpushed marks', async ($, on) => {
+/** The local-time stamp the panel draws for `CLEAN_MTIME`. */
+function stampOf(ms: number): string {
+  const d = new Date(ms)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`
+}
+
+test('FILES draws the header, the tree with plain glyphs, badges, counts and times', async ($, on) => {
   mock.clock(on, { now: NOW + 3_600_000 })
   bootFiles(on, true)
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  // title row and branch row
   expect(await ui.find({ type: 'Text', text: /^FILES$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^↑1$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /3 changed/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /register\.tsx/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^M \+41 −3$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^A \+88$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^M \+6 −1$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /index\.d\.ts/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^↑$/ })).toBeDefined()
-  // docs holds only a clean file: one collapsed row with a count of 1, and its file stays out of sight
-  expect(await ui.find({ type: 'Text', text: /^docs\s*$/ })).toBeDefined()
+  const titles = await ui.findAll({ type: 'Text', text: /^claude-sidebar$/ })
+  expect(titles.map(t => t.props.color)).toContain('#5b9bd5')
+  expect(await ui.find({ type: 'Text', text: /^⎇ $/ })).toBeDefined()
+  const branches = await ui.findAll({ type: 'Text', text: /^main$/ })
+  expect(branches.map(t => t.props.bold)).toContain(true)
+  expect(await ui.find({ type: 'Text', text: /^ ↑1$/ })).toBeDefined()
+  const unpushed = await ui.find({ type: 'Text', text: /^ ↑$/ })
+  expect(unpushed).toBeDefined()
+  expect(unpushed?.props.color).toBe('#61afef')
+  const upstream = await ui.find({ type: 'Text', text: /^ origin\/main$/ })
+  expect(upstream?.props.color).toBe('#808a96')
+  expect(await ui.find({ type: 'Text', text: /^ N:1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ D:1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /changed/ })).toBeUndefined()
+  // plain glyphs: open folders, a folder square, a file dot
+  expect(await ui.find({ type: 'Text', text: /^▾ $/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^▸ $/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^■ $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^· $/ })).toBeDefined()
+  // register.tsx: lines and a bold amber M
+  expect(await ui.find({ type: 'Text', text: /^register\.tsx$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ \+41$/ })).toBeDefined()
+  const del = await ui.find({ type: 'Text', text: /^ -3$/ })
+  expect(del?.props.color).toBe('#e06c75')
+  const badge = await ui.find({ type: 'Text', text: /^ M$/ })
+  expect(badge?.props.bold).toBe(true)
+  expect(badge?.props.color).toBe('#e5c07b')
+  expect(await ui.find({ type: 'Text', text: /^ A$/ })).toBeDefined()
+  // the hooks folder row rolls up its lines and counts
+  expect(await ui.find({ type: 'Text', text: /^ \+129$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ M:1$/ })).toBeDefined()
+  // a clean file shows its timestamp
+  const clean = await ui.find({ type: 'Text', text: new RegExp(`^ ${stampOf(CLEAN_MTIME)}$`) })
+  expect(clean?.props.color).toBe('#808a96')
+  expect(await ui.find({ type: 'Text', text: /index\.d\.ts/ })).toBeDefined()
+  // a deleted file is struck through and red
+  const gone = await ui.find({ type: 'Text', text: /^old\.d\.ts$/ })
+  expect(gone?.props.strikethrough).toBe(true)
+  expect(gone?.props.color).toBe('#d0605e')
+  // docs holds only a clean file: one collapsed row, its file out of sight
+  expect(await ui.find({ type: 'Text', text: /^docs$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /FEEDBACK\.md/ })).toBeUndefined()
-  // the ignored folder is a dim row
-  const ignored = await ui.find({ type: 'Text', text: /node_modules/ })
-  expect(ignored).toBeDefined()
-  expect(ignored?.props.dimColor).toBe(true)
+  // .git is a muted folder; the ignored folder is muted with the ignored badge
+  const dotGit = await ui.find({ type: 'Text', text: /^\.git$/ })
+  expect(dotGit?.props.color).toBe('#808a96')
+  const ignored = await ui.find({ type: 'Text', text: /^node_modules$/ })
+  expect(ignored?.props.color).toBe('#808a96')
+  expect(await ui.find({ type: 'Text', text: /^ ⊘$/ })).toBeDefined()
+  // the old fills and marks are gone
+  expect(await ui.find({ type: 'Text', text: /◆|◇/ })).toBeUndefined()
   await ui.unmount()
 })
 
-test('FILES marks a written file while the tool runs and drops the mark after 45 s', async ($, on) => {
+test('FILES draws Nerd Font glyphs when a Nerd Font is installed', async ($, on) => {
+  mock.clock(on, { now: NOW + 3_600_000 })
+  bootFiles(on, true, true)
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe0a0)} $`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xf47c)} $`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xf460)} $`) })).toBeDefined()
+  // an open folder, a collapsed one, and a .tsx file by extension
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe5fe)} $`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe5ff)} $`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe7ba)} $`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xf0354)} $`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ ${String.fromCodePoint(0xf05e)}$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^■ $|^· $/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('FILES colours a written file while the tool runs and drops the colour after 45 s', async ($, on) => {
   const clock = mock.clock(on, { now: NOW + 7_200_000 })
   bootFiles(on, true)
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   await $.tool.call({ tool: 'Write', tool_use_id: 'tu-w', file_path: `${ROOT}/hooks/register.tsx`, content: 'x' })
   const marked = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  expect(await marked.find({ type: 'Text', text: /^◆ $/ })).toBeDefined()
+  expect((await marked.find({ type: 'Text', text: /^register\.tsx$/ }))?.props.color).toBe('#f97316')
+  expect(await marked.find({ type: 'Text', text: /◆/ })).toBeUndefined()
   await marked.unmount()
 
   await clock.advance(46_000)
   const later = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  expect(await later.find({ type: 'Text', text: /^◆ $/ })).toBeUndefined()
-  expect(await later.find({ type: 'Text', text: /register\.tsx/ })).toBeDefined()
+  // back to its git colour: amber for a modified file
+  expect((await later.find({ type: 'Text', text: /^register\.tsx$/ }))?.props.color).toBe('#e5c07b')
   await later.unmount()
 })
 
@@ -334,9 +416,12 @@ test('FILES outside a repo lists the top level and says so', async ($, on) => {
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /^scratch$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /not a git repo/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /notes\.txt/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^src\s*$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /changed|clean/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^notes\.txt$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^src$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^ ${stampOf(CLEAN_MTIME)}$`) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /clean|N:|M:|D:/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^⎇ $/ })).toBeUndefined()
   await ui.unmount()
 })
