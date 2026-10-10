@@ -244,6 +244,18 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   expect(calls).toBe(before)
 })
 
+/** The props of the FILES `Client` in a mounted drawing: the kit exposes them, not what the module draws. */
+async function filesProps(ui: { find: (m: any) => Promise<any> }): Promise<{ rows: any[]; now: number }> {
+  const client = await ui.find({ type: 'Client' })
+  expect(client?.props.module).toBe('hooks/rows.tsx')
+  return client.props.props
+}
+
+/** The first segment of any row, either column, whose text matches. */
+function segOf(p: { rows: any[] }, text: RegExp): any {
+  return p.rows.flatMap(r => [...r.left, ...r.right]).find((g: any) => text.test(g.t))
+}
+
 const ROOT = '/Users/wesley/Projects/claude-sidebar'
 const NUL = '\0'
 const CLEAN_MTIME = Date.parse('2026-03-04T09:05:00Z')
@@ -318,6 +330,7 @@ test('FILES draws the header, the tree with plain glyphs, badges, counts and tim
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const p = await filesProps(ui)
   // title row and branch row
   expect(await ui.find({ type: 'Text', text: /^FILES$/ })).toBeDefined()
   const titles = await ui.findAll({ type: 'Text', text: /^claude-sidebar$/ })
@@ -326,48 +339,48 @@ test('FILES draws the header, the tree with plain glyphs, badges, counts and tim
   const branches = await ui.findAll({ type: 'Text', text: /^main$/ })
   expect(branches.map(t => t.props.bold)).toContain(true)
   expect(await ui.find({ type: 'Text', text: /^ ↑1$/ })).toBeDefined()
-  const unpushed = await ui.find({ type: 'Text', text: /^ ↑$/ })
+  const unpushed = segOf(p, /^ ↑$/)
   expect(unpushed).toBeDefined()
-  expect(unpushed?.props.color).toBe('#61afef')
+  expect(unpushed?.c).toBe('#61afef')
   const upstream = await ui.find({ type: 'Text', text: /^ origin\/main$/ })
   expect(upstream?.props.color).toBe('#808a96')
   expect(await ui.find({ type: 'Text', text: /^ N:1$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^ D:1$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /changed/ })).toBeUndefined()
   // plain glyphs: open folders, a folder square, a file dot
-  expect(await ui.find({ type: 'Text', text: /^▾ $/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^▸ $/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^■ $/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^· $/ })).toBeDefined()
+  expect(segOf(p, /▾ $/)).toBeDefined()
+  expect(segOf(p, /▸ $/)).toBeDefined()
+  expect(segOf(p, /^■ $/)).toBeDefined()
+  expect(segOf(p, /^· $/)).toBeDefined()
   // register.tsx: lines and a bold amber M
-  expect(await ui.find({ type: 'Text', text: /^register\.tsx$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ \+41$/ })).toBeDefined()
-  const del = await ui.find({ type: 'Text', text: /^ -3$/ })
-  expect(del?.props.color).toBe('#e06c75')
-  const badge = await ui.find({ type: 'Text', text: /^ M$/ })
-  expect(badge?.props.bold).toBe(true)
-  expect(badge?.props.color).toBe('#e5c07b')
-  expect(await ui.find({ type: 'Text', text: /^ A$/ })).toBeDefined()
+  expect(segOf(p, /^register\.tsx$/)).toBeDefined()
+  expect(segOf(p, /^ \+41$/)).toBeDefined()
+  const del = segOf(p, /^ -3$/)
+  expect(del?.c).toBe('#e06c75')
+  const badge = segOf(p, /^ M$/)
+  expect(badge?.b).toBe(true)
+  expect(badge?.c).toBe('#e5c07b')
+  expect(segOf(p, /^ A$/)).toBeDefined()
   // the hooks folder row rolls up its lines and counts
-  expect(await ui.find({ type: 'Text', text: /^ \+129$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ M:1$/ })).toBeDefined()
+  expect(segOf(p, /^ \+129$/)).toBeDefined()
+  expect(segOf(p, /^ M:1$/)).toBeDefined()
   // a clean file shows its timestamp
-  const clean = await ui.find({ type: 'Text', text: new RegExp(`^ ${stampOf(CLEAN_MTIME)}$`) })
-  expect(clean?.props.color).toBe('#808a96')
-  expect(await ui.find({ type: 'Text', text: /index\.d\.ts/ })).toBeDefined()
+  const clean = segOf(p, new RegExp(`^ ${stampOf(CLEAN_MTIME)}$`))
+  expect(clean?.c).toBe('#808a96')
+  expect(segOf(p, /index\.d\.ts/)).toBeDefined()
   // a deleted file is struck through and red
-  const gone = await ui.find({ type: 'Text', text: /^old\.d\.ts$/ })
-  expect(gone?.props.strikethrough).toBe(true)
-  expect(gone?.props.color).toBe('#d0605e')
+  const gone = segOf(p, /^old\.d\.ts$/)
+  expect(gone?.s).toBe(true)
+  expect(gone?.c).toBe('#d0605e')
   // docs holds only a clean file: one collapsed row, its file out of sight
-  expect(await ui.find({ type: 'Text', text: /^docs$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /FEEDBACK\.md/ })).toBeUndefined()
+  expect(segOf(p, /^docs$/)).toBeDefined()
+  expect(segOf(p, /FEEDBACK\.md/)).toBeUndefined()
   // .git is a muted folder; the ignored folder is muted with the ignored badge
-  const dotGit = await ui.find({ type: 'Text', text: /^\.git$/ })
-  expect(dotGit?.props.color).toBe('#808a96')
-  const ignored = await ui.find({ type: 'Text', text: /^node_modules$/ })
-  expect(ignored?.props.color).toBe('#808a96')
-  expect(await ui.find({ type: 'Text', text: /^ ⊘$/ })).toBeDefined()
+  const dotGit = segOf(p, /^\.git$/)
+  expect(dotGit?.c).toBe('#808a96')
+  const ignored = segOf(p, /^node_modules$/)
+  expect(ignored?.c).toBe('#808a96')
+  expect(segOf(p, /^ ⊘$/)).toBeDefined()
   // the old fills and marks are gone
   expect(await ui.find({ type: 'Text', text: /◆|◇/ })).toBeUndefined()
   await ui.unmount()
@@ -379,35 +392,61 @@ test('FILES draws Nerd Font glyphs when a Nerd Font is installed', async ($, on)
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const p = await filesProps(ui)
   expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe0a0)} $`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xf47c)} $`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xf460)} $`) })).toBeDefined()
+  expect(segOf(p, new RegExp(`${String.fromCodePoint(0xf47c)} $`))).toBeDefined()
+  expect(segOf(p, new RegExp(`${String.fromCodePoint(0xf460)} $`))).toBeDefined()
   // an open folder, a collapsed one, and a .tsx file by extension
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe5fe)} $`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe5ff)} $`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xe7ba)} $`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^${String.fromCodePoint(0xf0354)} $`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^ ${String.fromCodePoint(0xf05e)}$`) })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^■ $|^· $/ })).toBeUndefined()
+  expect(segOf(p, new RegExp(`^${String.fromCodePoint(0xe5fe)} $`))).toBeDefined()
+  expect(segOf(p, new RegExp(`^${String.fromCodePoint(0xe5ff)} $`))).toBeDefined()
+  expect(segOf(p, new RegExp(`^${String.fromCodePoint(0xe7ba)} $`))).toBeDefined()
+  expect(segOf(p, new RegExp(`^${String.fromCodePoint(0xf0354)} $`))).toBeDefined()
+  expect(segOf(p, new RegExp(`^ ${String.fromCodePoint(0xf05e)}$`))).toBeDefined()
+  expect(segOf(p, /^■ $|^· $/)).toBeUndefined()
   await ui.unmount()
 })
 
-test('FILES colours a written file while the tool runs and drops the colour after 45 s', async ($, on) => {
+test('FILES lights a written file for 45 s and then drops the sweep', async ($, on) => {
   const clock = mock.clock(on, { now: NOW + 7_200_000 })
   bootFiles(on, true)
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   await $.tool.call({ tool: 'Write', tool_use_id: 'tu-w', file_path: `${ROOT}/hooks/register.tsx`, content: 'x' })
+  const writtenAt = NOW + 7_200_000
   const marked = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  expect((await marked.find({ type: 'Text', text: /^register\.tsx$/ }))?.props.color).toBe('#f97316')
-  expect(await marked.find({ type: 'Text', text: /◆/ })).toBeUndefined()
+  const lit = await filesProps(marked)
+  expect(lit.now).toBe(writtenAt)
+  const row = lit.rows.find((r: any) => r.id === 'hooks/register.tsx')
+  const name = row.left.find((g: any) => g.t === 'register.tsx')
+  expect(name).toMatchObject({ c: '#f97316', sh: 'write', at: writtenAt })
+  expect(row.left.find((g: any) => g.one)).toMatchObject({ sh: 'write', at: writtenAt })
+  // the right column is plain: no sweep
+  expect(row.right.some((g: any) => g.sh)).toBe(false)
+  // only the written file is lit
+  expect(lit.rows.filter((r: any) => [...r.left, ...r.right].some((g: any) => g.sh)).length).toBe(1)
+  expect(segOf(lit, /◆/)).toBeUndefined()
   await marked.unmount()
 
   await clock.advance(46_000)
   const later = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  // back to its git colour: amber for a modified file
-  expect((await later.find({ type: 'Text', text: /^register\.tsx$/ }))?.props.color).toBe('#e5c07b')
+  const idle = await filesProps(later)
+  const gone = idle.rows.find((r: any) => r.id === 'hooks/register.tsx')
+  // back to its git colour: amber for a modified file, and nothing sweeps
+  expect(gone.left.find((g: any) => g.t === 'register.tsx')).toEqual({ t: 'register.tsx', c: '#e5c07b' })
+  expect(JSON.stringify(idle.rows)).not.toContain('"sh"')
   await later.unmount()
+})
+
+test('FILES lights a read file purple', async ($, on) => {
+  mock.clock(on, { now: NOW + 7_200_000 })
+  bootFiles(on, true)
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+
+  await $.tool.call({ tool: 'Read', tool_use_id: 'tu-r', file_path: `${ROOT}/README.md` })
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const p = await filesProps(ui)
+  expect(segOf(p, /^README\.md$/)).toMatchObject({ c: '#c084fc', sh: 'read', at: NOW + 7_200_000 })
+  await ui.unmount()
 })
 
 test('FILES outside a repo lists the top level and says so', async ($, on) => {
@@ -416,11 +455,12 @@ test('FILES outside a repo lists the top level and says so', async ($, on) => {
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const p = await filesProps(ui)
   expect(await ui.find({ type: 'Text', text: /^scratch$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /not a git repo/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^notes\.txt$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^src$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: new RegExp(`^ ${stampOf(CLEAN_MTIME)}$`) })).toBeDefined()
+  expect(segOf(p, /^notes\.txt$/)).toBeDefined()
+  expect(segOf(p, /^src$/)).toBeDefined()
+  expect(segOf(p, new RegExp(`^ ${stampOf(CLEAN_MTIME)}$`))).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /clean|N:|M:|D:/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^⎇ $/ })).toBeUndefined()
   await ui.unmount()

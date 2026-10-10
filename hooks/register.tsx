@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface, Timer } from 'claude-code'
 
+import type { RowSeg, RowSpec } from './rows'
 import type { Activity, AgentRow, Compactions, FilesState, ListedEntry, ModelTally, Place, Sample, Segment, Snapshot, Window } from '../types'
 
 const STORE_KEY = 'enabled'
@@ -860,6 +861,26 @@ function rowRight(r: FileRow, nerdOn: boolean): Seg[] {
   return segs
 }
 
+/** A segment for `rows.tsx` without its unset fields: the props are plain JSON, which holds no `undefined`. */
+function wire(seg: RowSeg): RowSeg {
+  return Object.fromEntries(Object.entries(seg).filter(([, v]) => v !== undefined && v !== false)) as RowSeg
+}
+
+/** The wire form of a FILES row for the surface module `rows.tsx`: lit segments carry the sweep tone and the activity's time. */
+function rowSpec(r: FileRow, nerdOn: boolean, at: number | undefined): RowSpec {
+  const tone = rowTone(r)
+  const sh = r.mark && at !== undefined ? r.mark : undefined
+  return {
+    id: r.path,
+    left: [
+      { t: `${'  '.repeat(r.depth)}${r.isDir ? chevronGlyph(r.expanded, nerdOn) : ' '} `, c: MUTED },
+      { t: `${iconGlyph(r, nerdOn)} `, c: r.isDir ? (tone ?? ACCENT) : tone, one: true, sh, at: sh ? at : undefined },
+      { t: r.name, c: tone, s: r.letter === 'D', sh, at: sh ? at : undefined },
+    ].map(wire),
+    right: rowRight(r, nerdOn).map(g => wire({ t: g.t, c: g.color, b: g.bold })),
+  }
+}
+
 async function open($: EngineInterface): Promise<void> {
   const opened = await $.ui.open({ id: PANE, title: 'Sidebar', columns: WANT_COLUMNS })
   if (!opened.isPlaced) $.ui.toast(`sidebar: ${opened.reason}`)
@@ -1087,10 +1108,11 @@ export const register: Register = (on, options) => {
     const here = await read($, place)
     const filesNow = await read($, files)
     const marks = await read($, activity)
+    const filesClock = await $.clock.now()
     const nerdOn = options.glyphs === 'nerd' ? true : options.glyphs === 'plain' ? false : await read($, nerd)
     const tallies = Object.entries(await read($, byModel)).sort((a, b) => b[1].tokens - a[1].tokens || b[1].calls - a[1].calls)
     const topTokens = Math.max(1, ...tallies.map(([, t]) => t.tokens))
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Client } = $.ui.resolve(e)
     const width = Math.max(12, e.props.bodyColumns)
 
     if (!snap) {
@@ -1332,24 +1354,7 @@ export const register: Register = (on, options) => {
                 </Box>
               </Box>
             )}
-            {tree.rows.map(r => {
-              const tone = rowTone(r)
-              return (
-                <Box key={`file-${r.path}`} flexDirection="row" height={1} overflow="hidden">
-                  <Box flexShrink={1} overflow="hidden" flexDirection="row">
-                    <Text color={MUTED}>{`${'  '.repeat(r.depth)}${r.isDir ? chevronGlyph(r.expanded, nerdOn) : ' '} `}</Text>
-                    <Text color={r.isDir ? (tone ?? ACCENT) : tone}>{`${iconGlyph(r, nerdOn)} `}</Text>
-                    <Text color={tone} strikethrough={r.letter === 'D'} wrap="truncate-end">{r.name}</Text>
-                  </Box>
-                  <Box flexGrow={1} />
-                  <Box flexShrink={0} flexDirection="row">
-                    {rowRight(r, nerdOn).map((g, i) => (
-                      <Text key={`${r.path}-${i}`} color={g.color} bold={g.bold}>{g.t}</Text>
-                    ))}
-                  </Box>
-                </Box>
-              )
-            })}
+            <Client key="files-rows" module="./rows.tsx" props={{ rows: tree.rows.map(r => rowSpec(r, nerdOn, marks[r.path]?.at)), now: filesClock }} />
             {tree.more > 0 && <Text dimColor>… {tree.more} more</Text>}
           </Box>
         )}
