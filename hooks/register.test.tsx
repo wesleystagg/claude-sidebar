@@ -43,7 +43,7 @@ const PANE = {
   props: {
     title: 'Sidebar',
     isFocused: false,
-    bodyColumns: 36,
+    bodyColumns: 44,
     placement: 'dock',
     scroll: { offset: 0, bodyRows: 40 },
     view: {},
@@ -67,6 +67,7 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
   on('session.cwd', () => ({ value: '/Users/wesley/Projects/agency-os' }))
   on('session.repo', () => ({ value: { root: '/Users/wesley/Projects/agency-os', remote: null, internal: false, name: null } }))
+  on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not mocked', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.read', (_, e) => ({ value: e.path.endsWith('/.git/HEAD') ? 'ref: refs/heads/main\n' : '' }))
   on('session.compact', () => ({ messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }], tokensBefore: 150_000, tokensAfter: 20_000 }))
   on('classic.UserPromptSubmit', () => ({}))
@@ -113,7 +114,7 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
     expect(await ui.find({ type: 'Text', text: /deferred/ })).toBeUndefined()
     // the stacked bar spans the pane's full body width
     const bar = (await ui.findAll({ type: 'Text', text: /^[█▒░]+$/ })).slice(0, 5)
-    expect(bar.reduce((sum, t) => sum + t.text.length, 0)).toBe(36)
+    expect(bar.reduce((sum, t) => sum + t.text.length, 0)).toBe(44)
     expect(await ui.find({ type: 'Text', text: /5h/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /23\.5%/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /resets in 2h 10m/ })).toBeDefined()
@@ -241,4 +242,101 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   const before = calls
   await clock.advance(5 * 60_000)
   expect(calls).toBe(before)
+})
+
+const ROOT = '/Users/wesley/Projects/claude-sidebar'
+const NUL = '\0'
+
+/** A git answer by argv: the status, the tracked list, both numstats and the unpushed set of the FILES fixture. */
+function gitAnswer(argv: readonly string[]): string {
+  const line = argv.slice(1).join(' ')
+  if (line.startsWith('status')) {
+    return ['## main...origin/main [ahead 1]', ' M hooks/register.tsx', 'A  hooks/register.test.tsx', ' M README.md', '!! node_modules/', ''].join(NUL)
+  }
+  if (line === 'ls-files -z') {
+    return ['README.md', 'docs/FEEDBACK.md', 'hooks/register.test.tsx', 'hooks/register.tsx', 'types/index.d.ts', ''].join(NUL)
+  }
+  if (line === 'diff --numstat -z') return ['41\t3\thooks/register.tsx', '6\t1\tREADME.md', ''].join(NUL)
+  if (line === 'diff --numstat --cached -z') return ['88\t0\thooks/register.test.tsx', ''].join(NUL)
+  if (line.startsWith('diff --name-only')) return ['types/index.d.ts', ''].join(NUL)
+  return ''
+}
+
+/** The mocks every FILES test needs, with git answering from the fixture. */
+function bootFiles(on: Parameters<Parameters<typeof test>[1]>[1], repo: boolean) {
+  mock.store(on)
+  on('session.usage', () => ({ value: usage() }))
+  on('session.model', () => ({ value: 'claude-fable-5-1' }))
+  on('session.cwd', () => ({ value: repo ? ROOT : '/Users/wesley/scratch' }))
+  on('session.repo', () => ({ value: repo ? { root: ROOT, remote: null, internal: false, name: null } : null }))
+  on('fs.read', () => ({ value: 'ref: refs/heads/main\n' }))
+  on('fs.list', () => ({
+    value: [
+      { name: 'notes.txt', kind: 'file' as const, size: 10, mtimeMs: 0, isLink: false },
+      { name: 'src', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false },
+    ],
+  }))
+  on('process.run', (_, e) => ({
+    value: { exitCode: 0, stdout: gitAnswer(e.argv), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('tool.call', () => ({ result: { stdout: 'ok', stderr: '' } }))
+}
+
+test('FILES draws the pruned tree with git letters, numstat and unpushed marks', async ($, on) => {
+  mock.clock(on, { now: NOW + 3_600_000 })
+  bootFiles(on, true)
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /^FILES$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^↑1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /3 changed/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /register\.tsx/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^M \+41 −3$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^A \+88$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^M \+6 −1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /index\.d\.ts/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^↑$/ })).toBeDefined()
+  // docs holds only a clean file: one collapsed row with a count of 1, and its file stays out of sight
+  expect(await ui.find({ type: 'Text', text: /^docs\s*$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^▸ $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /FEEDBACK\.md/ })).toBeUndefined()
+  // the ignored folder is a dim row
+  const ignored = await ui.find({ type: 'Text', text: /node_modules/ })
+  expect(ignored).toBeDefined()
+  expect(ignored?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+test('FILES marks a written file while the tool runs and drops the mark after 45 s', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW + 7_200_000 })
+  bootFiles(on, true)
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+
+  await $.tool.call({ tool: 'Write', tool_use_id: 'tu-w', file_path: `${ROOT}/hooks/register.tsx`, content: 'x' })
+  const marked = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await marked.find({ type: 'Text', text: /^◆ $/ })).toBeDefined()
+  await marked.unmount()
+
+  await clock.advance(46_000)
+  const later = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await later.find({ type: 'Text', text: /^◆ $/ })).toBeUndefined()
+  expect(await later.find({ type: 'Text', text: /register\.tsx/ })).toBeDefined()
+  await later.unmount()
+})
+
+test('FILES outside a repo lists the top level and says so', async ($, on) => {
+  mock.clock(on, { now: NOW + 10_800_000 })
+  bootFiles(on, false)
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /not a git repo/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /notes\.txt/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^src\s*$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /changed|clean/ })).toBeUndefined()
+  await ui.unmount()
 })
