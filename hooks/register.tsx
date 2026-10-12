@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, EngineInterface, Timer } from 'claude-code'
+import type { Register, EngineInterface, Timer, ElementConstructor, BoxProps, TextProps, RenderElement } from 'claude-code'
 
 import type { RowSeg, RowSpec } from './rows'
-import type { Activity, AgentRow, Compactions, FilesState, ListedEntry, ModelTally, Place, Sample, Segment, Snapshot, Window } from '../types'
+import type { Activity, AgentRow, Compactions, FilesState, GroupGit, ListedEntry, ModelTally, OutsideFile, Place, Sample, Segment, Snapshot, Window } from '../types'
 
 const STORE_KEY = 'enabled'
 const COMMAND = 'sidebar'
@@ -23,6 +23,8 @@ const ACTIVITY_MS = 45_000
 const FILES_MIN_GAP_MS = 1000
 /** Rows of the FILES tree drawn; the rest collapse into a `… N more` line. */
 const FILES_MAX_ROWS = 40
+/** Rows of ELSEWHERE drawn across all its groups; the rest collapse into a `… N more` line. */
+const ELSEWHERE_MAX_ROWS = 20
 /** FILES palette: fixed hexes, so the tree reads the same in every theme. */
 const WRITE_COLOR = '#f97316'
 const READ_COLOR = '#c084fc'
@@ -60,6 +62,8 @@ const byModel = atom({ plugin: 'sidebar', key: 'byModel' } as const, {})
 const files = atom({ plugin: 'sidebar', key: 'files' } as const, null)
 const activity = atom({ plugin: 'sidebar', key: 'activity' } as const, {})
 const nerd = atom({ plugin: 'sidebar', key: 'nerd' } as const, false)
+const elsewhere = atom({ plugin: 'sidebar', key: 'elsewhere' } as const, {})
+const elsewhereGit = atom({ plugin: 'sidebar', key: 'elsewhereGit' } as const, {})
 
 const GLYPH: Record<Segment['kind'], string> = { used: '█', buffer: '▒', free: '░', deferred: '' }
 const MARK: Record<Segment['kind'], string> = { used: '■', buffer: '▒', free: '░', deferred: '' }
@@ -430,6 +434,22 @@ async function runGit($: EngineInterface, root: string, args: string[]): Promise
   }
 }
 
+type GitPicture = Pick<FilesState, 'branch' | 'upstream' | 'ahead' | 'behind' | 'hasUpstream' | 'status' | 'numstat' | 'unpushed'>
+
+/** Status, both numstats and the unpushed set of the repo at `root`; `ok` is false when `git status` itself failed. */
+async function readGit($: EngineInterface, root: string): Promise<{ ok: boolean; git: GitPicture }> {
+  const [statusOut, unstagedOut, stagedOut, unpushedOut] = await Promise.all([
+    runGit($, root, ['status', '--porcelain=v1', '-z', '--branch', '--untracked-files=normal', '--ignored=traditional']),
+    runGit($, root, ['diff', '--numstat', '-z']),
+    runGit($, root, ['diff', '--numstat', '--cached', '-z']),
+    runGit($, root, ['diff', '--name-only', '-z', '@{upstream}..HEAD']),
+  ])
+  const numstat: Record<string, { add: number; del: number }> = {}
+  parseNumstat(unstagedOut ?? '', numstat)
+  parseNumstat(stagedOut ?? '', numstat)
+  return { ok: statusOut !== null, git: { ...parseStatus(statusOut ?? ''), numstat, unpushed: splitNul(unpushedOut) } }
+}
+
 // One git refresh at a time; a call that lands during one joins it, and one that lands
 // within FILES_MIN_GAP_MS of the last finish is replayed once when that gap is over.
 let filesRun: Promise<void> | null = null
@@ -516,24 +536,14 @@ async function gatherFiles($: EngineInterface): Promise<void> {
       return
     }
     const root = repo.root
-    const [statusOut, listOut, unstagedOut, stagedOut, unpushedOut] = await Promise.all([
-      runGit($, root, ['status', '--porcelain=v1', '-z', '--branch', '--untracked-files=normal', '--ignored=traditional']),
-      runGit($, root, ['ls-files', '-z']),
-      runGit($, root, ['diff', '--numstat', '-z']),
-      runGit($, root, ['diff', '--numstat', '--cached', '-z']),
-      runGit($, root, ['diff', '--name-only', '-z', '@{upstream}..HEAD']),
-    ])
+    const [got, listOut] = await Promise.all([readGit($, root), runGit($, root, ['ls-files', '-z'])])
     // Git gave nothing at all: keep the last drawing rather than blanking it.
-    if (statusOut === null && listOut === null) return
-    const numstat: Record<string, { add: number; del: number }> = {}
-    parseNumstat(unstagedOut ?? '', numstat)
-    parseNumstat(stagedOut ?? '', numstat)
-    const parsed = parseStatus(statusOut ?? '')
-    const unpushed = splitNul(unpushedOut)
+    if (!got.ok && listOut === null) return
+    const git = got.git
     // The folders the tree will draw open, from git and live activity, are the ones read from disk.
     const live = Object.fromEntries(Object.entries(await read($, activity)).filter(([, m]) => takenAt - m.at < ACTIVITY_MS))
-    const listed = await listDirs($, root, ['', ...expandedDirs(parsed.status, unpushed, live)])
-    const next: FilesState = { root, isRepo: true, ...parsed, tracked: splitNul(listOut), listed, numstat, unpushed, takenAt }
+    const listed = await listDirs($, root, ['', ...expandedDirs(git.status, git.unpushed, live)])
+    const next: FilesState = { root, isRepo: true, ...git, tracked: splitNul(listOut), listed, takenAt }
     await update($, files, () => next)
   } catch {
     // No session bound yet: keep the last drawing.
@@ -554,7 +564,7 @@ async function refreshFiles($: EngineInterface): Promise<void> {
     }
     return
   }
-  const run = gatherFiles($).finally(async () => {
+  const run = Promise.all([gatherFiles($), gatherElsewhere($)]).then(() => undefined).finally(async () => {
     filesRun = null
     filesDoneAt = await $.clock.now()
   })
@@ -566,13 +576,16 @@ async function refreshFilesIfOn($: EngineInterface): Promise<void> {
   if (await read($, enabled)) void refreshFiles($)
 }
 
-/** Marks a file the session is reading or writing; a path outside the repo (or cwd) is ignored. */
+/** Marks a file the session is reading or writing; a path outside the repo (or cwd) goes to ELSEWHERE instead. */
 async function markActivity($: EngineInterface, path: string | undefined, kind: Activity['kind']): Promise<void> {
   try {
     if (!path || !(await read($, enabled))) return
     const [cwd, repo] = await Promise.all([$.session.cwd(), $.session.repo()])
     const root = (repo?.root ?? cwd).replace(/\/+$/, '')
-    if (!path.startsWith(`${root}/`)) return
+    if (!path.startsWith(`${root}/`)) {
+      if (path !== root) await markOutside($, path, kind)
+      return
+    }
     const rel = path.slice(root.length + 1)
     const at = await $.clock.now()
     $.clock.after(ACTIVITY_MS, () => void pruneActivity($))
@@ -693,19 +706,18 @@ function normalisePath(path: string): string {
   return `/${out.join('/')}`
 }
 
-/** Marks the existing files and folders inside the repo (or cwd) that a shell command's readers name as read. */
+/** Marks the existing files and folders a shell command's readers name as read: inside the repo (or cwd) for FILES, elsewhere for ELSEWHERE. */
 async function markShellReads($: EngineInterface, command: string): Promise<void> {
   try {
     if (!(await read($, enabled))) return
     const candidates = readTargets(command).slice(0, SHELL_READ_CAP)
     if (candidates.length === 0) return
-    const [cwd, repo, home] = await Promise.all([$.session.cwd(), $.session.repo(), $.env.get('HOME')])
-    const root = (repo?.root ?? cwd).replace(/\/+$/, '')
+    const [cwd, home] = await Promise.all([$.session.cwd(), $.env.get('HOME')])
     for (const c of candidates) {
       const raw = c === '~' || c.startsWith('~/') ? (home ? `${home}${c.slice(1)}` : '') : c
       if (raw === '') continue
       const path = normalisePath(raw.startsWith('/') ? raw : `${cwd}/${raw}`)
-      if (!path.startsWith(`${root}/`) || !(await $.fs.exists(path))) continue
+      if (!(await $.fs.exists(path))) continue
       await markActivity($, path, 'read')
     }
   } catch {
@@ -720,6 +732,76 @@ async function pruneActivity($: EngineInterface): Promise<void> {
     const live = Object.entries(marks).filter(([, m]) => now - m.at < ACTIVITY_MS)
     return live.length === Object.keys(marks).length ? marks : Object.fromEntries(live)
   })
+}
+
+// ---- ELSEWHERE: paths the session touches outside the FILES root, grouped by the repo that holds them ----
+
+/** The group a path outside the FILES root is filed under: the nearest folder above it holding a `.git`, else its parent folder. */
+async function groupOf($: EngineInterface, path: string): Promise<{ root: string; isRepo: boolean }> {
+  const parent = path.slice(0, path.lastIndexOf('/')) || '/'
+  let dir = parent
+  for (;;) {
+    if (await $.fs.exists(`${dir === '/' ? '' : dir}/.git`).catch(() => false)) return { root: dir, isRepo: true }
+    if (dir === '/') return { root: parent, isRepo: false }
+    dir = dir.slice(0, dir.lastIndexOf('/')) || '/'
+  }
+}
+
+/** Whether a path is a folder now; a path not there yet (a Write about to create it) is not. */
+async function isFolder($: EngineInterface, path: string): Promise<boolean> {
+  try {
+    return (await $.fs.stat(path)).kind === 'dir'
+  } catch {
+    return false
+  }
+}
+
+/** Records a path outside the FILES root: filed under its group on first touch, re-stamped on each later one. */
+async function markOutside($: EngineInterface, raw: string, kind: Activity['kind']): Promise<void> {
+  if (!raw.startsWith('/')) return
+  const path = normalisePath(raw)
+  if (path === '/') return
+  const known = (await read($, elsewhere))[path]
+  const place = known ? { root: known.root, isRepo: known.isRepo, isDir: known.isDir } : { ...(await groupOf($, path)), isDir: await isFolder($, path) }
+  const at = await $.clock.now()
+  // The row stays; only its colour fades, so the pane is drawn again once the mark is over.
+  $.clock.after(ACTIVITY_MS, () => {
+    try {
+      $.ui.invalidate('ui.render')
+    } catch {
+      // The next state write redraws it anyway.
+    }
+  })
+  let isNewGroup = false
+  await update($, elsewhere, map => {
+    const prev = map[path]
+    // A live write mark is not downgraded by a read.
+    if (kind === 'read' && prev?.kind === 'write' && at - prev.at < ACTIVITY_MS) return map
+    isNewGroup = place.isRepo && !Object.values(map).some(f => f.root === place.root)
+    const next: OutsideFile = { kind, at, root: place.root, isRepo: place.isRepo, isDir: place.isDir }
+    return { ...map, [path]: next }
+  })
+  // A repo seen for the first time is read at once rather than at the next refresh.
+  if (isNewGroup) void readGroup($, place.root)
+}
+
+/** Reads one ELSEWHERE group's git; a repo git cannot read loses its entry, so its rows draw without badges. */
+async function readGroup($: EngineInterface, root: string): Promise<void> {
+  const [{ ok, git }, takenAt] = await Promise.all([readGit($, root), $.clock.now()])
+  await update($, elsewhereGit, groups => {
+    if (ok) return { ...groups, [root]: { ...git, takenAt } }
+    return root in groups ? Object.fromEntries(Object.entries(groups).filter(([r]) => r !== root)) : groups
+  })
+}
+
+/** Reads every ELSEWHERE group that is a repo, one git call set each. */
+async function gatherElsewhere($: EngineInterface): Promise<void> {
+  try {
+    const roots = new Set(Object.values(await read($, elsewhere)).filter(f => f.isRepo).map(f => f.root))
+    await Promise.all([...roots].map(root => readGroup($, root)))
+  } catch {
+    // No session bound yet: keep the last drawing.
+  }
 }
 
 type TreeNode = {
@@ -758,7 +840,7 @@ type FileRow = {
 type Roll = { add: number; del: number; newN: number; modN: number; delN: number }
 
 /** Lines and file counts of everything git flags at or under `prefix` (`''` is the whole repo). */
-function rollUp(state: FilesState, prefix: string): Roll {
+function rollUp(state: Pick<FilesState, 'numstat' | 'status'>, prefix: string): Roll {
   const roll: Roll = { add: 0, del: 0, newN: 0, modN: 0, delN: 0 }
   const under = (path: string): boolean => prefix === '' || path.startsWith(`${prefix}/`)
   for (const [path, stat] of Object.entries(state.numstat)) {
@@ -875,13 +957,85 @@ function buildRows(state: FilesState, marks: Record<string, Activity>): { rows: 
   return { rows: rows.slice(0, FILES_MAX_ROWS), more: Math.max(0, rows.length - FILES_MAX_ROWS) }
 }
 
+type OutsideGroup = { root: string; name: string; isRepo: boolean; git: GroupGit | null; rows: FileRow[] }
+
+/** The `XY` of `rel` in a status: its own, or that of the untracked or ignored folder above it that git lists instead. */
+function statusOf(status: Record<string, { xy: string }>, rel: string): string | undefined {
+  const own = status[rel]?.xy
+  if (own !== undefined) return own
+  const parts = rel.split('/')
+  for (let i = 1; i < parts.length; i += 1) {
+    const above = status[`${parts.slice(0, i).join('/')}/`]?.xy
+    if (above !== undefined) return above
+  }
+  return undefined
+}
+
+/** ELSEWHERE as groups of flat rows (paths relative to the group), groups by folder name, rows by path; ELSEWHERE_MAX_ROWS rows in all. */
+function outsideGroups(outside: Record<string, OutsideFile>, gits: Record<string, GroupGit>, now: number): { groups: OutsideGroup[]; more: number } {
+  const byRoot = new Map<string, OutsideGroup>()
+  for (const [path, f] of Object.entries(outside)) {
+    let group = byRoot.get(f.root)
+    if (!group) {
+      group = { root: f.root, name: f.root.split('/').filter(part => part !== '').pop() ?? '/', isRepo: f.isRepo, git: f.isRepo ? (gits[f.root] ?? null) : null, rows: [] }
+      byRoot.set(f.root, group)
+    }
+    const rel = f.root === '/' ? path.slice(1) : path.slice(f.root.length + 1)
+    const git = group.git
+    const xy = git ? statusOf(git.status, f.isDir ? `${rel}/` : rel) : undefined
+    const base = {
+      path,
+      name: rel,
+      depth: 0,
+      expanded: false,
+      isLink: false,
+      mtimeMs: undefined,
+      mark: now - f.at < ACTIVITY_MS ? f.kind : null,
+      unpushed: false,
+      add: 0,
+      del: 0,
+      newN: 0,
+      modN: 0,
+      delN: 0,
+    }
+    if (f.isDir) {
+      const opaque = xy === '!!' ? ('ignored' as const) : xy === '??' ? ('untracked' as const) : undefined
+      const roll = git && !opaque ? rollUp(git, rel) : {}
+      group.rows.push({ ...base, isDir: true, ...(opaque ? { opaque } : {}), ignored: opaque === 'ignored', letter: opaque === 'untracked' ? '?' : null, ...roll })
+    } else {
+      const mark = xy === undefined ? null : gitMark(xy)
+      const stat = git?.numstat[rel]
+      group.rows.push({
+        ...base,
+        isDir: false,
+        letter: mark?.letter ?? null,
+        unpushed: git !== null && mark === null && git.unpushed.includes(rel),
+        add: stat?.add ?? 0,
+        del: stat?.del ?? 0,
+        ignored: xy === '!!',
+      })
+    }
+  }
+  const byName = (a: string, b: string): number => a.toLowerCase().localeCompare(b.toLowerCase())
+  const groups = [...byRoot.values()].sort((a, b) => byName(a.name, b.name) || byName(a.root, b.root))
+  let left = ELSEWHERE_MAX_ROWS
+  let more = 0
+  for (const g of groups) {
+    g.rows.sort((a, b) => byName(a.name, b.name))
+    more += Math.max(0, g.rows.length - left)
+    g.rows = g.rows.slice(0, left)
+    left -= g.rows.length
+  }
+  return { groups: groups.filter(g => g.rows.length > 0), more }
+}
+
 /** The colour of a row's icon and name: activity, then git state, then muted for dot and ignored; undefined is the terminal's own. */
 function rowTone(r: FileRow): string | undefined {
   if (r.mark === 'write') return WRITE_COLOR
   if (r.mark === 'read') return READ_COLOR
   if (r.letter) return GIT_COLOR[r.letter]
   if (r.unpushed) return UNPUSHED_COLOR
-  if (r.ignored || r.name.startsWith('.')) return MUTED
+  if (r.ignored || baseName(r.name).startsWith('.')) return MUTED
   return undefined
 }
 
@@ -927,6 +1081,11 @@ const FILE_ICON_EXTS: Record<string, number> = {
   h: 0xf0af5, hpp: 0xf0af5, vue: 0xe6a0, svelte: 0xe697, csv: 0xe64a, txt: 0xf09aa,
 }
 
+/** The last part of a row's name: FILES names are one part already, ELSEWHERE's are paths. */
+function baseName(name: string): string {
+  return name.slice(name.lastIndexOf('/') + 1)
+}
+
 /** The chevron of a folder row, without its trailing space. */
 function chevronGlyph(open: boolean, nerdOn: boolean): string {
   if (!nerdOn) return open ? '▾' : '▸'
@@ -938,7 +1097,7 @@ function iconGlyph(r: FileRow, nerdOn: boolean): string {
   if (!nerdOn) return r.isDir ? '■' : '·'
   if (r.isLink) return String.fromCodePoint(0xf481)
   if (r.isDir) return String.fromCodePoint(r.expanded ? 0xe5fe : 0xe5ff)
-  const lower = r.name.toLowerCase()
+  const lower = baseName(r.name).toLowerCase()
   const named = FILE_ICON_NAMES[lower]
   if (named) return String.fromCodePoint(named)
   const dot = lower.lastIndexOf('.')
@@ -1005,6 +1164,38 @@ function rowSpec(r: FileRow, nerdOn: boolean, at: number | undefined): RowSpec {
     ].map(wire),
     right: rowRight(r, nerdOn).map(g => wire({ t: g.t, c: g.color, b: g.bold })),
   }
+}
+
+/** A section's title row (`word`, the folder's name in the accent colour) and, for a repo git can read, its branch row with the whole repo's totals. */
+function repoHead(Box: ElementConstructor<BoxProps>, Text: ElementConstructor<TextProps>, word: string, key: string, name: string, isRepo: boolean, git: GroupGit | null, nerdOn: boolean): RenderElement[] {
+  const head = (
+    <Box key={`${key}-head`} flexDirection="row" gap={1}>
+      <Text bold>{word}</Text>
+      <Text color={ACCENT} wrap="truncate-end">{name}</Text>
+      {!isRepo && <Text color={MUTED}>not a git repo</Text>}
+    </Box>
+  )
+  if (!isRepo || !git) return [head]
+  const roll = rollUp(git, '')
+  return [
+    head,
+    <Box key={`${key}-branch`} flexDirection="row" height={1} overflow="hidden">
+      <Box flexShrink={1} overflow="hidden" flexDirection="row">
+        <Text color={ACCENT}>{`${nerdOn ? String.fromCodePoint(0xe0a0) : '⎇'} `}</Text>
+        {git.branch && <Text bold wrap="truncate-end">{git.branch}</Text>}
+        {git.ahead > 0 && <Text color={AHEAD_COLOR}>{` ↑${git.ahead}`}</Text>}
+        {git.behind > 0 && <Text color={BEHIND_COLOR}>{` ↓${git.behind}`}</Text>}
+        {git.upstream && <Text color={MUTED} wrap="truncate-end">{` ${git.upstream}`}</Text>}
+      </Box>
+      <Box flexGrow={1} />
+      <Box flexShrink={0} flexDirection="row">
+        {[...lineSegs(roll.add, roll.del), ...countSegs(roll)].map((g, i) => (
+          <Text key={`total-${i}`} color={g.color} bold={g.bold}>{g.t}</Text>
+        ))}
+        {roll.newN + roll.modN + roll.delN === 0 && <Text color={MUTED}> clean</Text>}
+      </Box>
+    </Box>,
+  ]
 }
 
 async function open($: EngineInterface): Promise<void> {
@@ -1235,6 +1426,8 @@ export const register: Register = (on, options) => {
     const here = await read($, place)
     const filesNow = await read($, files)
     const marks = await read($, activity)
+    const outsideNow = await read($, elsewhere)
+    const outsideGit = await read($, elsewhereGit)
     const filesClock = await $.clock.now()
     const nerdOn = options.glyphs === 'nerd' ? true : options.glyphs === 'plain' ? false : await read($, nerd)
     const tallies = Object.entries(await read($, byModel)).sort((a, b) => b[1].tokens - a[1].tokens || b[1].calls - a[1].calls)
@@ -1261,7 +1454,7 @@ export const register: Register = (on, options) => {
     const runLabelWidth = Math.max(4, width - 2 - 1 - 7) // mark + space, label, space, elapsed(6)
 
     const tree = filesNow ? buildRows(filesNow, marks) : null
-    const repoRoll = filesNow ? rollUp(filesNow, '') : { add: 0, del: 0, newN: 0, modN: 0, delN: 0 }
+    const outside = outsideGroups(outsideNow, outsideGit, filesClock)
 
     return (
       <Box flexDirection="column">
@@ -1458,31 +1651,21 @@ export const register: Register = (on, options) => {
 
         {filesNow && tree && (
           <Box key="files" flexDirection="column" marginTop={1}>
-            <Box key="files-head" flexDirection="row" gap={1}>
-              <Text bold>FILES</Text>
-              <Text color={ACCENT} wrap="truncate-end">{filesNow.root.split('/').filter(part => part !== '').pop() ?? '/'}</Text>
-              {!filesNow.isRepo && <Text color={MUTED}>not a git repo</Text>}
-            </Box>
-            {filesNow.isRepo && (
-              <Box key="files-branch" flexDirection="row" height={1} overflow="hidden">
-                <Box flexShrink={1} overflow="hidden" flexDirection="row">
-                  <Text color={ACCENT}>{`${nerdOn ? String.fromCodePoint(0xe0a0) : '⎇'} `}</Text>
-                  {filesNow.branch && <Text bold wrap="truncate-end">{filesNow.branch}</Text>}
-                  {filesNow.ahead > 0 && <Text color={AHEAD_COLOR}>{` ↑${filesNow.ahead}`}</Text>}
-                  {filesNow.behind > 0 && <Text color={BEHIND_COLOR}>{` ↓${filesNow.behind}`}</Text>}
-                  {filesNow.upstream && <Text color={MUTED} wrap="truncate-end">{` ${filesNow.upstream}`}</Text>}
-                </Box>
-                <Box flexGrow={1} />
-                <Box flexShrink={0} flexDirection="row">
-                  {[...lineSegs(repoRoll.add, repoRoll.del), ...countSegs(repoRoll)].map((g, i) => (
-                    <Text key={`total-${i}`} color={g.color} bold={g.bold}>{g.t}</Text>
-                  ))}
-                  {repoRoll.newN + repoRoll.modN + repoRoll.delN === 0 && <Text color={MUTED}> clean</Text>}
-                </Box>
-              </Box>
-            )}
+            {repoHead(Box, Text, 'FILES', 'files', filesNow.root.split('/').filter(part => part !== '').pop() ?? '/', filesNow.isRepo, filesNow, nerdOn)}
             <Client key="files-rows" module="./rows.tsx" props={{ rows: tree.rows.map(r => rowSpec(r, nerdOn, marks[r.path]?.at)), now: filesClock }} />
             {tree.more > 0 && <Text dimColor>… {tree.more} more</Text>}
+          </Box>
+        )}
+
+        {outside.groups.length > 0 && (
+          <Box key="elsewhere" flexDirection="column">
+            {outside.groups.map(g => (
+              <Box key={`else-${g.root}`} flexDirection="column" marginTop={1}>
+                {repoHead(Box, Text, 'ELSEWHERE', `else-${g.root}`, g.name, g.isRepo, g.git, nerdOn)}
+                <Client key={`else-rows-${g.root}`} module="./rows.tsx" props={{ rows: g.rows.map(r => rowSpec(r, nerdOn, outsideNow[r.path]?.at)), now: filesClock }} />
+              </Box>
+            ))}
+            {outside.more > 0 && <Text dimColor>… {outside.more} more</Text>}
           </Box>
         )}
       </Box>

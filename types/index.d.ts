@@ -108,6 +108,21 @@ export type FilesState = {
   takenAt: number
 }
 
+/** A path the session read or wrote outside the FILES root; kept for the session, lit for 45 s after `at`. */
+export type OutsideFile = {
+  /** The last event's kind and time, as for Activity. */
+  kind: 'read' | 'write'
+  at: number
+  /** Its group: the git repository holding it, or its parent folder when no repository does. */
+  root: string
+  isRepo: boolean
+  /** A folder a shell reader named (`ls`, `grep -r`), drawn as a collapsed folder. */
+  isDir: boolean
+}
+
+/** The git picture of one ELSEWHERE group's repository: FILES's status, numstat and unpushed calls, without the file list. */
+export type GroupGit = Pick<FilesState, 'branch' | 'upstream' | 'ahead' | 'behind' | 'hasUpstream' | 'status' | 'numstat' | 'unpushed' | 'takenAt'>
+
 declare module 'claude-code' {
   interface PluginState {
     sidebar: {
@@ -127,6 +142,10 @@ declare module 'claude-code' {
       activity: Record<string, Activity>
       /** Whether FILES draws Nerd Font glyphs, as resolved at session start from the `glyphs` setting. */
       nerd: boolean
+      /** ELSEWHERE: every path touched outside the FILES root this session, by absolute path. */
+      elsewhere: Record<string, OutsideFile>
+      /** ELSEWHERE: the git picture of each group that is a repository, by its root; absent when git cannot read it. */
+      elsewhereGit: Record<string, GroupGit>
     }
   }
 }

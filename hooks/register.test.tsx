@@ -1,4 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 import type { SessionContextBreakdown, SessionUsage } from 'claude-code'
 
 const NOW = Date.parse('2026-10-07T12:00:00Z')
@@ -260,8 +261,10 @@ const ROOT = '/Users/wesley/Projects/claude-sidebar'
 const NUL = '\0'
 const CLEAN_MTIME = Date.parse('2026-03-04T09:05:00Z')
 
-/** A git answer by argv: the status, the tracked list, both numstats and the unpushed set of the FILES fixture. */
-function gitAnswer(argv: readonly string[]): string {
+/** A git answer by argv and the folder it runs in: the FILES fixture, the ELSEWHERE repo's, or a failure (null) for the gone repo. */
+function gitAnswer(argv: readonly string[], cwd?: string): string | null {
+  if (cwd === OTHER) return otherGitAnswer(argv)
+  if (cwd === GONE) return null
   const line = argv.slice(1).join(' ')
   if (line.startsWith('status')) {
     return [
@@ -283,6 +286,20 @@ function gitAnswer(argv: readonly string[]): string {
   return ''
 }
 
+/** ELSEWHERE fixtures: a repo outside the FILES root, a repo git cannot read, and a folder in no repo. */
+const OTHER = '/Users/wesley/Projects/other'
+const GONE = '/Users/wesley/Projects/gone'
+const LOOSE = '/Users/wesley/loose'
+
+/** The git answers of OTHER: branch dev two behind, one modified file, an untracked and an ignored folder, one unpushed file. */
+function otherGitAnswer(argv: readonly string[]): string {
+  const line = argv.slice(1).join(' ')
+  if (line.startsWith('status')) return ['## dev...origin/dev [behind 2]', ' M src/app.ts', '?? notes/', '!! build/', ''].join(NUL)
+  if (line === 'diff --numstat -z') return ['5\t2\tsrc/app.ts', ''].join(NUL)
+  if (line.startsWith('diff --name-only')) return ['lib/util.ts', ''].join(NUL)
+  return ''
+}
+
 const file = (name: string, mtimeMs = 0) => ({ name, kind: 'file' as const, size: 10, mtimeMs, isLink: false })
 const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
 
@@ -295,7 +312,7 @@ function listRepo(path: string) {
 }
 
 /** The mocks every FILES test needs, with git answering from the fixture; `fonts` puts a Nerd Font in the user's font folder. */
-function bootFiles(on: Parameters<Parameters<typeof test>[1]>[1], repo: boolean, fonts = false) {
+function bootFiles(on: Parameters<TestBody>[1], repo: boolean, fonts = false) {
   mock.store(on)
   on('session.usage', () => ({ value: usage() }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
@@ -309,9 +326,10 @@ function bootFiles(on: Parameters<Parameters<typeof test>[1]>[1], repo: boolean,
     if (e.path === '/Users/wesley/scratch') return { value: [file('notes.txt', CLEAN_MTIME), dir('src')] }
     return { value: listRepo(e.path) }
   })
-  on('process.run', (_, e) => ({
-    value: { exitCode: 0, stdout: gitAnswer(e.argv), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
-  }))
+  on('process.run', (_, e) => {
+    const out = gitAnswer(e.argv, e.init?.cwd)
+    return { value: { exitCode: out === null ? 128 : 0, stdout: out ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
   on('tool.call', () => ({ result: { stdout: 'ok', stderr: '' } }))
@@ -479,7 +497,7 @@ function litRows(p: { rows: any[] }): Record<string, string> {
 const SHELL_REAL = ['README.md', 'docs', 'hooks', 'hooks/register.tsx']
 
 /** Boots a repo session where only the `real` repo-relative paths exist; returns the paths `fs.exists` was asked about. */
-async function bootShell($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1], real: string[]) {
+async function bootShell($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], real: string[]) {
   mock.clock(on, { now: NOW + 7_200_000 })
   bootFiles(on, true)
   const asked: string[] = []
@@ -540,6 +558,107 @@ test('FILES ignores shell writes and paths outside the repo', async ($, on) => {
   await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-b9', command: 'cat /etc/hosts ../outside.txt 2>&1 > hooks/register.tsx' })
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
   expect(litRows(await filesProps(ui))).toEqual({})
-  expect(asked).toEqual([])
+  // the outside reads are looked up for ELSEWHERE, and neither exists, so nothing is recorded
+  expect(asked).toEqual(['/etc/hosts', '/Users/wesley/Projects/outside.txt'])
+  expect(await ui.find({ type: 'Text', text: /^ELSEWHERE$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+/** The rows of every ELSEWHERE `Client` (each after the FILES one), by row id. */
+async function elsewhereRows(ui: { findAll: (m: any) => Promise<any[]> }): Promise<Record<string, any>> {
+  const clients = await ui.findAll({ type: 'Client' })
+  const out: Record<string, any> = {}
+  for (const c of clients.slice(1)) for (const r of c.props.props.rows) out[r.id] = r
+  return out
+}
+
+/** Boots a repo session that also knows OTHER and GONE as repos (each has a `.git`), and `src` and `lib` of OTHER as folders. */
+async function bootElsewhere($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) {
+  const clock = mock.clock(on, { now: NOW + 7_200_000 })
+  bootFiles(on, true)
+  const folders = [`${OTHER}/src`, `${OTHER}/lib`]
+  on('fs.exists', (_, e) => ({ value: e.path === `${OTHER}/.git` || e.path === `${GONE}/.git` || folders.includes(e.path) || e.path === `${OTHER}/lib/util.ts` }))
+  on('fs.stat', (_, e) => ({ value: { kind: folders.includes(e.path) ? ('dir' as const) : ('file' as const), size: 1, mtimeMs: 0, isLink: false } }))
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+  return clock
+}
+
+test('ELSEWHERE files outside reads and writes under their repo with git badges; inside ones stay in FILES', async ($, on) => {
+  const clock = await bootElsewhere($, on)
+  const before = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await before.find({ type: 'Text', text: /^ELSEWHERE$/ })).toBeUndefined()
+  expect((await before.findAll({ type: 'Client' })).length).toBe(1)
+  await before.unmount()
+
+  await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o1', file_path: `${OTHER}/src/app.ts` })
+  await $.tool.call({ tool: 'Write', tool_use_id: 'tu-o2', file_path: `${OTHER}/notes/todo.md`, content: 'x' })
+  await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o3', file_path: `${OTHER}/build/out.js` })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-o4', command: 'cat ~/Projects/other/lib/util.ts && ls ~/Projects/other/src' })
+  await $.tool.call({ tool: 'Edit', tool_use_id: 'tu-o5', file_path: `${GONE}/a.txt`, old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o6', file_path: `${LOOSE}/x.txt` })
+  await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o7', file_path: `${ROOT}/README.md` })
+
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  // one header per group: the section word, the folder name in the accent colour
+  expect((await ui.findAll({ type: 'Text', text: /^ELSEWHERE$/ })).length).toBe(3)
+  for (const name of ['other', 'gone', 'loose']) {
+    const title = await ui.find({ type: 'Text', text: new RegExp(`^${name}$`) })
+    expect(title?.props.color).toBe('#5b9bd5')
+  }
+  expect((await ui.findAll({ type: 'Text', text: /not a git repo/ })).length).toBe(1)
+  // OTHER's branch row: branch, behind, upstream, then the whole repo's totals
+  expect((await ui.find({ type: 'Text', text: /^dev$/ }))?.props.bold).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /^ ↓2$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ origin\/dev$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ \+5$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ M:1$/ })).toBeDefined()
+  // two branch rows in all: FILES's and OTHER's; the unreadable repo draws none
+  expect((await ui.findAll({ type: 'Text', text: /^⎇ $/ })).length).toBe(2)
+
+  const rows = await elsewhereRows(ui)
+  expect(Object.keys(rows).sort()).toEqual(
+    [`${GONE}/a.txt`, `${LOOSE}/x.txt`, `${OTHER}/build/out.js`, `${OTHER}/lib/util.ts`, `${OTHER}/notes/todo.md`, `${OTHER}/src`, `${OTHER}/src/app.ts`].sort(),
+  )
+  const right = (id: string) => rows[id].right.map((g: any) => g.t).join('')
+  const name = (id: string, t: string) => rows[id].left.find((g: any) => g.t === t)
+  // paths relative to the group, lit like FILES: purple read, orange write
+  expect(name(`${OTHER}/src/app.ts`, 'src/app.ts')).toMatchObject({ c: '#c084fc', sh: 'read' })
+  expect(right(`${OTHER}/src/app.ts`)).toBe(' +5 -2 M')
+  expect(name(`${OTHER}/notes/todo.md`, 'notes/todo.md')).toMatchObject({ c: '#f97316', sh: 'write' })
+  expect(right(`${OTHER}/notes/todo.md`)).toBe(' ?')
+  expect(right(`${OTHER}/build/out.js`)).toBe(' ⊘')
+  expect(right(`${OTHER}/lib/util.ts`)).toBe(' ↑')
+  // a folder a shell reader named: collapsed, with its own totals
+  expect(rows[`${OTHER}/src`].left[0].t).toBe('▸ ')
+  expect(right(`${OTHER}/src`)).toBe(' +5 -2 M:1')
+  // no badge where git cannot read the repo, nor outside any repo
+  expect(right(`${GONE}/a.txt`)).toBe('  ')
+  expect(right(`${LOOSE}/x.txt`)).toBe('  ')
+  // the inside read stays in FILES alone
+  expect(rows[`${ROOT}/README.md`]).toBeUndefined()
+  expect(litRows(await filesProps(ui))).toEqual({ 'README.md': 'read' })
+  await ui.unmount()
+
+  // after 45 s the colour is gone and the rows stay, badges and all
+  await clock.advance(46_000)
+  const later = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const kept = await elsewhereRows(later)
+  expect(Object.keys(kept).length).toBe(7)
+  expect(JSON.stringify(kept)).not.toContain('"sh"')
+  expect(kept[`${OTHER}/src/app.ts`].left.find((g: any) => g.t === 'src/app.ts')).toEqual({ t: 'src/app.ts', c: '#e5c07b' })
+  await later.unmount()
+})
+
+test('ELSEWHERE draws at most 20 rows, then a more line', async ($, on) => {
+  await bootElsewhere($, on)
+  for (let i = 0; i < 25; i += 1) {
+    await $.tool.call({ tool: 'Read', tool_use_id: `tu-c${i}`, file_path: `${LOOSE}/f${String(i).padStart(2, '0')}.txt` })
+  }
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  const rows = await elsewhereRows(ui)
+  expect(Object.keys(rows).length).toBe(20)
+  expect(rows[`${LOOSE}/f00.txt`]).toBeDefined()
+  expect(rows[`${LOOSE}/f24.txt`]).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /… 5 more/ })).toBeDefined()
   await ui.unmount()
 })

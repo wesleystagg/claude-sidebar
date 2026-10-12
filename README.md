@@ -54,6 +54,15 @@ FILES claude-sidebar
     · index.d.ts                        2026-10-09 17:42 ↑
     · old.d.ts                                             D
   · README.md                                        +6 -1 M
+
+ELSEWHERE ops-box
+⎇ main origin/main                                +12 -3 M:2
+  · compose.yml                                      +9 -1 M
+  · README.md
+  · scripts/backup.sh                                +3 -2 M
+
+ELSEWHERE scratchpad not a git repo
+  · notes.txt
 ```
 
 ## Install
@@ -170,6 +179,35 @@ The icons need a [Nerd Font](https://www.nerdfonts.com/) installed and
 selected as the terminal's font; otherwise the private-use code points draw
 as empty boxes. Set `glyphs` to `plain` to avoid them.
 
+**ELSEWHERE.** The files the session reads and writes outside the FILES
+root (the repo root, or the working directory outside a repo), drawn below
+FILES in the same style. The section is absent until the first such file is
+touched. Each file is filed under the git repository that holds it (the
+nearest folder above it with a `.git`), or under its parent folder when no
+repository does, and each group is a block of its own, groups in
+case-insensitive alphabetical order of their folder's name.
+
+- **Header.** As in FILES: `ELSEWHERE` and the group folder's name in blue,
+  then the branch row with `↑N`, `↓N`, the upstream, and at the right the
+  whole repository's `+added -deleted` lines and `N:`/`M:`/`D:` counts, or
+  a muted `clean`. A group in no repository ends its title row with a muted
+  `not a git repo` and has no branch row. A repository git cannot read (moved,
+  deleted, unreadable) has no branch row either, and its rows no badges.
+- **Rows.** A flat list of paths relative to the group's folder,
+  case-insensitive alphabetical, with the FILES glyphs (the icon chosen by
+  the file's own name) and the FILES right-hand column of a file: its
+  `+added -deleted` lines and its badge (`M`, `A`, `D`, `R`, `C`, `?`, a blue
+  `↑` for committed but not pushed, a muted `⊘` for ignored). A file inside
+  an untracked or ignored folder takes that folder's `?` or `⊘`. No
+  modification time is shown. A folder a shell reader names (`ls`,
+  `grep -r`) is a collapsed folder row with the lines and counts beneath it.
+- **Colours and lifetime.** The same events mark a row as in FILES (Read,
+  Write, Edit, NotebookEdit, and the paths the shell readers name when they
+  exist; subagents' calls count; shell writes are not seen). The orange or
+  purple sweep fades 45 seconds after the last event, then git's colour
+  applies. The row itself stays for the rest of the session.
+- At most 20 rows are drawn across all groups, then a dim `… N more`.
+
 ## How it measures
 
 Everything comes from the Claude Code plugin API, with no extra API calls:
@@ -184,9 +222,10 @@ Everything comes from the Claude Code plugin API, with no extra API calls:
   Agent context bars are scaled to the session model's window, since the
   engine does not report another model's window size; the token figure
   beside the bar is exact.
-- The FILES rows are drawn by a surface module, `hooks/rows.tsx`, that runs
-  inside the terminal with its own 90 ms tick (only while a file is marked),
-  so the sweep animation does not redraw the pane.
+- The FILES and ELSEWHERE rows are drawn by a surface module,
+  `hooks/rows.tsx`, that runs inside the terminal with its own 90 ms tick
+  (only while a file is marked), so the sweep animation does not redraw the
+  pane.
 - FILES state comes from git itself (`status`, `ls-files`, `diff --numstat`
   and `diff --name-only @{upstream}..HEAD`), run through the engine with
   repo hooks off, plus a disk listing (the engine's `fs.list`) of the repo
@@ -196,6 +235,13 @@ Everything comes from the Claude Code plugin API, with no extra API calls:
   calls, on each prompt and once a minute. There is no file watcher, so an
   edit from another terminal shows at the next refresh. Refreshes closer than
   a second apart are folded into one.
+- An ELSEWHERE file's group is found once, the first time the path is
+  touched, by looking for `.git` in each folder above it. Each group that is
+  a repository runs the FILES git calls other than `ls-files` (`status`, both
+  `diff --numstat` and `diff --name-only @{upstream}..HEAD`) in its own
+  root: once when the group first appears, then with every FILES refresh.
+  The list of files touched is kept in session state, so a plugin reload
+  keeps it and a new session starts empty.
 - Workflow agents and cloud-remote agents raise no local events and are not
   tracked.
 
@@ -222,7 +268,7 @@ it; if the icons draw as boxes, select the font in the terminal or set
 
 The plugin is a hooks module, `hooks/register.tsx`, with its state contract
 in `types/index.d.ts` and a test beside it, plus one surface module,
-`hooks/rows.tsx`, that draws the FILES rows.
+`hooks/rows.tsx`, that draws the FILES and ELSEWHERE rows.
 
 ```bash
 claude plugin validate .   # manifest, marketplace file and hooks module
