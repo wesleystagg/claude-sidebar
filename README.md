@@ -25,10 +25,12 @@ CONTEXT 42%  85k/200k
 compacted 1× · last 14 min ago
 
 USAGE
-5h ████░░░░░░░░░░░░░░   31.5%
-   resets in 2h 5m · full in ~34m
-7d ███████████░░░░░░░     60%
-   resets in 3d
+5h    ███░░░░░░░░░░░░░░   31.5%
+      resets in 2h 5m · full in ~34m
+7d    ██████████░░░░░░░     60%
+      resets in 3d
+Fable █████████████░░░░     77%
+      resets in 3d
 
 BY MODEL this session
 fable-5-1      ██████████  1.2M
@@ -104,6 +106,19 @@ orange, 7-day in blue, a gateway spend limit in yellow, with the reset time
 counting down live. When the recent minutes' samples show a window filling
 faster than it resets, a `full in ~Nm` estimate appears: amber under 30
 minutes, red under 10.
+
+The per-model weekly window, when `/usage` reports one, gets its own row
+directly after the 7-day bar, in green and labelled with the model's name
+(`Fable`, say), with the same bar, reset countdown and `full in ~Nm` estimate.
+It is read by running Claude Code's own `claude -p /usage` (no model call, about
+one second, no session file written, no MCP servers started) and taking every `Current week (<model>): N% used · resets ...`
+line except the all-models one; the engine's rate-limit figures carry no
+per-model window. The command runs once when the panel opens and then every five
+minutes, never on the per-minute tick, one run at a time. If it fails, exits
+non-zero or prints no such line, the row vanishes: it is never left showing an
+old figure. A reset time that cannot be parsed leaves the row with its
+percentage and no countdown. The label column widens to the longest name, and
+the bars shorten to match.
 
 **BY MODEL.** Tokens this session by the model that answered each request,
 main loop and subagents alike, with bars scaled to the top model and colored
@@ -210,7 +225,8 @@ case-insensitive alphabetical order of their folder's name.
 
 ## How it measures
 
-Everything comes from the Claude Code plugin API, with no extra API calls:
+Everything comes from the Claude Code plugin API, with no extra API calls,
+except the per-model USAGE row, which is a `claude -p /usage` subprocess:
 
 - Context figures use the engine's local estimate (`breakdown: "summary"`),
   so they can differ slightly from `/context`, which counts with the

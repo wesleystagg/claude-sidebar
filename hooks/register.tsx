@@ -9,6 +9,8 @@ const COMMAND = 'sidebar'
 const PANE = 'sidebar'
 const WANT_COLUMNS = 60
 const TICK_MS = 60_000
+/** `claude -p /usage` is a ~1 s subprocess, so it is polled on its own slower cadence, not on every tick. */
+const MODEL_USAGE_MS = 5 * 60_000
 const MAX_AGENT_ROWS = 12
 /** A finished run's row fades this long after it ended; running rows always stay. */
 const FADE_MS = 2 * 60_000
@@ -54,6 +56,7 @@ const model = atom({ plugin: 'sidebar', key: 'model' } as const, null)
 const agents = atom({ plugin: 'sidebar', key: 'agents' } as const, [])
 const burned = atom({ plugin: 'sidebar', key: 'burned' } as const, 0)
 const samples = atom({ plugin: 'sidebar', key: 'samples' } as const, [])
+const modelWindows = atom({ plugin: 'sidebar', key: 'modelWindows' } as const, [])
 const compactions = atom({ plugin: 'sidebar', key: 'compactions' } as const, { count: 0 })
 const effort = atom({ plugin: 'sidebar', key: 'effort' } as const, null)
 const mode = atom({ plugin: 'sidebar', key: 'mode' } as const, null)
@@ -71,6 +74,23 @@ const MARK: Record<Segment['kind'], string> = { used: '■', buffer: '▒', free
 /** One theme color per rate-limit window, so the rows tell apart at a glance. */
 const WINDOW_COLOR: Record<string, string> = { five_hour: 'claude', seven_day: 'permission', spend_limit: 'warning' }
 const WINDOW_LABEL: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: '$ ' }
+/** Per-model weekly windows carry the kind `model:<display name>`. */
+const MODEL_KIND = 'model:'
+
+function windowColor(kind: string): string {
+  return kind.startsWith(MODEL_KIND) ? 'success' : (WINDOW_COLOR[kind] ?? 'text')
+}
+
+function windowLabel(kind: string): string {
+  return kind.startsWith(MODEL_KIND) ? kind.slice(MODEL_KIND.length) : (WINDOW_LABEL[kind] ?? kind.slice(0, 2))
+}
+
+/** The engine's windows with the per-model ones directly after `seven_day`, or at the end when there is none. */
+function mergeWindows(engine: Window[], perModel: Window[]): Window[] {
+  const at = engine.findIndex(w => w.kind === 'seven_day')
+  if (at < 0) return [...engine, ...perModel]
+  return [...engine.slice(0, at + 1), ...perModel, ...engine.slice(at + 1)]
+}
 
 /** One theme color per run status. */
 const STATUS_COLOR: Record<AgentRow['status'], string> = { running: 'warning', done: 'success', failed: 'error' }
@@ -211,6 +231,106 @@ function parseCfnAsk(command: string): { node: string; model: string } | null {
   return { node: node?.[1] ?? 'fleet', model: m?.[1] ?? 'fast' }
 }
 
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** Milliseconds `zone` is ahead of UTC at the instant `ms`; throws RangeError for a zone name Intl does not know. */
+function zoneOffset(ms: number, zone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+  }).formatToParts(new Date(ms))
+  const get = (type: string) => Number(parts.find(p => p.type === type)?.value)
+  return Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second')) - Math.floor(ms / 1000) * 1000
+}
+
+/** The instant of a wall-clock time in `zone` (the machine's own zone when absent). */
+function wallInstant(year: number, month: number, day: number, hour: number, minute: number, zone: string | undefined): number {
+  if (!zone) return new Date(year, month, day, hour, minute).getTime()
+  const guess = Date.UTC(year, month, day, hour, minute)
+  // The offset at the guess may sit across a DST change from the offset at the answer, so settle it twice.
+  const first = guess - zoneOffset(guess, zone)
+  return guess - zoneOffset(first, zone)
+}
+
+/**
+ * The ISO instant of a `/usage` reset such as `Oct 13 at 5pm (America/Denver)` or `Oct 13 at 5:30pm`,
+ * in the year that makes it the nearest instant after `now`. A missing zone reads in the machine's own.
+ * Undefined when the text does not parse.
+ */
+function parseResetTime(when: string, now: number): string | undefined {
+  const m = /^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,?\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*(?:\(([^)]+)\))?\s*$/i.exec(when.trim())
+  if (!m) return undefined
+  const month = MONTHS.indexOf((m[1] ?? '').slice(0, 3).toLowerCase())
+  const day = Number(m[2])
+  const hour12 = Number(m[3])
+  const minute = m[4] === undefined ? 0 : Number(m[4])
+  if (month < 0 || day < 1 || day > 31 || hour12 < 1 || hour12 > 12 || minute > 59) return undefined
+  const hour = (hour12 % 12) + ((m[5] ?? '').toLowerCase() === 'pm' ? 12 : 0)
+  const zone = m[6]?.trim() || undefined
+  try {
+    const year = new Date(now).getUTCFullYear()
+    const ahead = [year - 1, year, year + 1].map(y => wallInstant(y, month, day, hour, minute, zone)).filter(t => t > now)
+    const nearest = Math.min(...ahead)
+    return Number.isFinite(nearest) ? new Date(nearest).toISOString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** One window per `Current week (<model>): N% used · resets <when>` line of `/usage` output, except the all-models one. */
+function parseModelUsage(text: string, now: number): Window[] {
+  const out: Window[] = []
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*Current week \((.+?)\):\s*(\d+(?:\.\d+)?)%\s+used(?:\s*·\s*resets\s+(.+?))?\s*$/.exec(line)
+    const name = m?.[1]?.trim()
+    if (!m || !name || name.toLowerCase() === 'all models') continue
+    const resetsAt = m[3] ? parseResetTime(m[3], now) : undefined
+    out.push({ kind: `${MODEL_KIND}${name}`, percentUsed: Number(m[2]), ...(resetsAt ? { resetsAt } : {}) })
+  }
+  return out
+}
+
+let modelPolling = false
+
+/**
+ * Reads the per-model weekly windows from Claude Code's own `/usage` (no model call, ~2 s). Any failure, a
+ * non-zero exit or output with no such line leaves no rows: stale figures are never kept. One poll at a time.
+ */
+async function refreshModelUsage($: EngineInterface): Promise<void> {
+  if (modelPolling) return
+  modelPolling = true
+  try {
+    let found: Window[] = []
+    let now = 0
+    try {
+      // --no-session-persistence: a plain `claude -p` writes a transcript file per run (288 a day at this cadence).
+      // --strict-mcp-config with no --mcp-config: start no MCP servers; /usage needs none and it halves the start-up.
+      const done = await $.process.run(['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config'], { timeoutMs: 20_000 })
+      now = await $.clock.now()
+      if (done.exitCode === 0) found = parseModelUsage(done.stdout, now)
+    } catch {
+      found = []
+    }
+    await update($, modelWindows, () => found)
+    if (found.length > 0) {
+      const pct: Record<string, number> = {}
+      for (const w of found) pct[w.kind] = w.percentUsed
+      // Its own sample at the poll's time: the burn rate reads each window over real elapsed time.
+      await update($, samples, list => [{ at: now, pct }, ...list].filter(sm => now - sm.at <= SAMPLE_KEEP * 60_000).slice(0, SAMPLE_KEEP * 2))
+    }
+  } catch {
+    // Bookkeeping only: never fail the open or the tick that rides on it.
+  } finally {
+    modelPolling = false
+  }
+}
+
 async function refresh($: EngineInterface): Promise<void> {
   try {
     const [usage, current] = await Promise.all([$.session.usage({ breakdown: 'summary' }), $.session.model()])
@@ -239,9 +359,11 @@ async function refresh($: EngineInterface): Promise<void> {
       const pct: Record<string, number> = {}
       for (const w of windows) pct[w.kind] = w.percentUsed
       await update($, samples, list => {
-        // One sample a minute at most, newest first, the last SAMPLE_KEEP minutes.
-        const kept = list[0] && now - list[0].at < 55_000 ? list.slice(1) : list
-        return [{ at: now, pct }, ...kept].filter(sm => now - sm.at <= SAMPLE_KEEP * 60_000).slice(0, SAMPLE_KEEP)
+        // One engine sample a minute at most, newest first, the last SAMPLE_KEEP minutes; the per-model
+        // samples that refreshModelUsage adds ride in the same list and are never replaced here.
+        const last = list.findIndex(sm => Object.keys(sm.pct).some(k => !k.startsWith(MODEL_KIND)))
+        const kept = last >= 0 && now - (list[last]?.at ?? 0) < 55_000 ? list.filter((_, i) => i !== last) : list
+        return [{ at: now, pct }, ...kept].filter(sm => now - sm.at <= SAMPLE_KEEP * 60_000).slice(0, SAMPLE_KEEP * 2)
       })
     }
   } catch {
@@ -1207,6 +1329,7 @@ async function open($: EngineInterface): Promise<void> {
 // countdown and the elapsed times stay live between turns. A hot reload drops
 // this environment's timers, so `register` starts it again from the stored state.
 let tick: Timer | null = null
+let modelTick: Timer | null = null
 
 function startTick($: EngineInterface): void {
   tick?.cancel()
@@ -1216,11 +1339,18 @@ function startTick($: EngineInterface): void {
     void pruneActivity($)
     void refreshFiles($)
   })
+  // The per-model rows come from a subprocess: once now, then every MODEL_USAGE_MS. Whatever an
+  // earlier open left is dropped first, so a figure from before the panel closed never shows.
+  modelTick?.cancel()
+  void update($, modelWindows, () => []).then(() => refreshModelUsage($))
+  modelTick = $.clock.every(MODEL_USAGE_MS, () => void refreshModelUsage($))
 }
 
 function stopTick(): void {
   tick?.cancel()
   tick = null
+  modelTick?.cancel()
+  modelTick = null
 }
 
 export const register: Register = (on, options) => {
@@ -1420,6 +1550,7 @@ export const register: Register = (on, options) => {
     const runs = await read($, agents)
     const total = await read($, burned)
     const history = await read($, samples)
+    const perModel = await read($, modelWindows)
     const compacted = await read($, compactions)
     const level = await read($, effort)
     const permission = await read($, mode)
@@ -1450,7 +1581,9 @@ export const register: Register = (on, options) => {
     const pastCompact = snap.compactAt !== undefined && snap.totalTokens >= snap.compactAt
     const ctxColor = over || pastCompact ? 'error' : nearCompact ? 'warning' : 'text'
     const nameWidth = width - 2 - 6 // mark + space, then a right-aligned 5-wide token figure after a space
-    const barWidth = Math.max(6, width - 3 - 1 - 7) // label(2) + space, bar, space, pct(6)
+    const wins = mergeWindows(snap.windows, perModel)
+    const labelWidth = Math.max(2, ...wins.map(w => windowLabel(w.kind).length))
+    const barWidth = Math.max(6, width - (labelWidth + 1) - 1 - 7) // label + space, bar, space, pct(6)
     const runLabelWidth = Math.max(4, width - 2 - 1 - 7) // mark + space, label, space, elapsed(6)
 
     const tree = filesNow ? buildRows(filesNow, marks) : null
@@ -1537,13 +1670,13 @@ export const register: Register = (on, options) => {
         <Box key="usage-head" marginTop={1}>
           <Text bold>USAGE</Text>
         </Box>
-        {snap.windows.length === 0 && (
+        {wins.length === 0 && (
           <Text dimColor wrap="wrap">no rate-limit figures yet</Text>
         )}
-        {snap.windows.map((w, i) => {
+        {wins.map((w, i) => {
           const pct = Math.max(0, Math.min(100, w.percentUsed))
           const filled = Math.round((pct / 100) * barWidth)
-          const color = WINDOW_COLOR[w.kind] ?? 'text'
+          const color = windowColor(w.kind)
           const exceeded = w.percentUsed >= 100
           const reset = fmtReset(w.resetsAt, snap.takenAt)
           const eta = minutesToFull(w.kind, w.percentUsed, history, snap.takenAt)
@@ -1553,7 +1686,7 @@ export const register: Register = (on, options) => {
             <Box key={`win-${i}`} flexDirection="column">
               <Box>
                 <Text color={color} bold>
-                  {(WINDOW_LABEL[w.kind] ?? w.kind.slice(0, 2)).padEnd(2)}{' '}
+                  {windowLabel(w.kind).padEnd(labelWidth)}{' '}
                 </Text>
                 <Text color={color} wrap="truncate">
                   {'█'.repeat(filled)}
@@ -1568,7 +1701,7 @@ export const register: Register = (on, options) => {
               {(reset !== '' || fillsFirst) && (
                 <Box>
                   <Text dimColor wrap="truncate">
-                    {'   '}{reset}
+                    {' '.repeat(labelWidth + 1)}{reset}
                   </Text>
                   {fillsFirst && (
                     <Text color={eta < 10 ? 'error' : eta < 30 ? 'warning' : 'text'} dimColor={eta >= 30} wrap="truncate">
