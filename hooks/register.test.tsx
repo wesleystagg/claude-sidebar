@@ -705,7 +705,7 @@ test('USAGE adds a per-model weekly row from claude -p /usage, and drops it when
 
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
   await clock.advance(1)
-  expect(ran.argv).toEqual(['claude', '-p', '/usage'])
+  expect(ran.argv).toEqual(['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config'])
   expect(ran.count).toBe(1)
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })

@@ -9,7 +9,7 @@ const COMMAND = 'sidebar'
 const PANE = 'sidebar'
 const WANT_COLUMNS = 60
 const TICK_MS = 60_000
-/** `claude -p /usage` is a ~2 s subprocess, so it is polled on its own slower cadence, not on every tick. */
+/** `claude -p /usage` is a ~1 s subprocess, so it is polled on its own slower cadence, not on every tick. */
 const MODEL_USAGE_MS = 5 * 60_000
 const MAX_AGENT_ROWS = 12
 /** A finished run's row fades this long after it ended; running rows always stay. */
@@ -309,7 +309,9 @@ async function refreshModelUsage($: EngineInterface): Promise<void> {
     let found: Window[] = []
     let now = 0
     try {
-      const done = await $.process.run(['claude', '-p', '/usage'], { timeoutMs: 20_000 })
+      // --no-session-persistence: a plain `claude -p` writes a transcript file per run (288 a day at this cadence).
+      // --strict-mcp-config with no --mcp-config: start no MCP servers; /usage needs none and it halves the start-up.
+      const done = await $.process.run(['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config'], { timeoutMs: 20_000 })
       now = await $.clock.now()
       if (done.exitCode === 0) found = parseModelUsage(done.stdout, now)
     } catch {

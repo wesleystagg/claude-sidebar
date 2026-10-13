@@ -111,7 +111,7 @@ The per-model weekly window, when `/usage` reports one, gets its own row
 directly after the 7-day bar, in green and labelled with the model's name
 (`Fable`, say), with the same bar, reset countdown and `full in ~Nm` estimate.
 It is read by running Claude Code's own `claude -p /usage` (no model call, about
-two seconds) and taking every `Current week (<model>): N% used · resets ...`
+one second, no session file written, no MCP servers started) and taking every `Current week (<model>): N% used · resets ...`
 line except the all-models one; the engine's rate-limit figures carry no
 per-model window. The command runs once when the panel opens and then every five
 minutes, never on the per-minute tick, one run at a time. If it fails, exits
