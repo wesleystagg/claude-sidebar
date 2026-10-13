@@ -662,3 +662,179 @@ test('ELSEWHERE draws at most 20 rows, then a more line', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /… 5 more/ })).toBeDefined()
   await ui.unmount()
 })
+
+const USAGE_TEXT = `You are currently using your subscription to power your Claude Code usage
+
+Current session: 56% used · resets Oct 13 at 12pm (America/Denver)
+Current week (all models): 41% used · resets Oct 13 at 5pm (America/Denver)
+Current week (Fable): 77% used · resets Oct 13 at 5pm (America/Denver)
+
+What's contributing to your limits usage?
+`
+
+/** The mocks a USAGE test needs; `usageReply` is what `claude -p /usage` answers, and `ran` counts its runs. */
+function bootUsage(on: Parameters<TestBody>[1], usageReply: { current: { exitCode: number; stdout: string } | 'throw' }) {
+  const ran = { count: 0, argv: [] as string[] }
+  mock.store(on)
+  on('session.usage', () => ({ value: usage() }))
+  on('session.model', () => ({ value: 'claude-fable-5-1' }))
+  on('session.cwd', () => ({ value: '/Users/wesley/Projects/agency-os' }))
+  on('session.repo', () => ({ value: null }))
+  on('env.get', () => ({ value: '/Users/wesley' }))
+  on('fs.read', () => ({ value: '' }))
+  on('fs.list', () => ({ value: [] }))
+  on('process.run', (_, e) => {
+    if (e.argv[0] === 'claude') {
+      ran.count += 1
+      ran.argv = [...e.argv]
+      const reply = usageReply.current
+      if (reply === 'throw') throw new Error('spawn claude ENOENT')
+      return { value: { exitCode: reply.exitCode, stdout: reply.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    return { value: { exitCode: 128, stdout: '', stderr: 'not mocked', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  return ran
+}
+
+test('USAGE adds a per-model weekly row from claude -p /usage, and drops it when the command fails', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const reply: Parameters<typeof bootUsage>[1] = { current: { exitCode: 0, stdout: USAGE_TEXT } }
+  const ran = bootUsage(on, reply)
+
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+  await clock.advance(1)
+  expect(ran.argv).toEqual(['claude', '-p', '/usage'])
+  expect(ran.count).toBe(1)
+
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /^Fable $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\s*77%$/ })).toBeDefined()
+  // 2026-10-13 5pm in Denver (UTC-6) is 23:00Z, six and a half days after NOW
+  expect(await ui.find({ type: 'Text', text: /resets in 6d/ })).toBeDefined()
+  // the all-models line and the session line are not rows of their own
+  expect(await ui.find({ type: 'Text', text: /41%/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /56%/ })).toBeUndefined()
+  // the label column widens to the longest label: 5h and 7d pad to five cells
+  expect(await ui.find({ type: 'Text', text: /^5h    $/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^7d    $/ })).toBeDefined()
+  // the row follows 7d, before nothing else here, and every row keeps one line (same bar width)
+  const labels = (await ui.findAll({ type: 'Text', text: /^(5h|7d|Fable) +$/ })).map(t => t.text.trim())
+  expect(labels).toEqual(['5h', '7d', 'Fable'])
+  const bars = await ui.findAll({ type: 'Text', text: /^[█░]+$/ })
+  const barLen = (t: { text: string }) => t.text.length
+  // 5h, 7d and Fable each draw a filled run and an empty run summing to one bar width
+  const widthsOfBars = [bars.slice(-6, -4), bars.slice(-4, -2), bars.slice(-2)].map(pair => pair.reduce((n, t) => n + barLen(t), 0))
+  expect(new Set(widthsOfBars).size).toBe(1)
+  await ui.unmount()
+
+  // The poll repeats every five minutes, not every minute; a failure removes the row at once.
+  reply.current = { exitCode: 1, stdout: USAGE_TEXT }
+  await clock.advance(4 * 60_000)
+  expect(ran.count).toBe(1)
+  await clock.advance(61_000)
+  expect(ran.count).toBe(2)
+  const failed = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await failed.find({ type: 'Text', text: /Fable/ })).toBeUndefined()
+  expect(await failed.find({ type: 'Text', text: /5h/ })).toBeDefined()
+  await failed.unmount()
+
+  // It comes back when the command does, and the burn rate reads the row over the real time between polls:
+  // 77% at the first poll, 80% ten minutes later is 0.3 points a minute, so 20 points left is ~67 minutes.
+  reply.current = { exitCode: 0, stdout: USAGE_TEXT.replace('77%', '80%') }
+  await clock.advance(5 * 60_000)
+  await clock.advance(1)
+  const back = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await back.find({ type: 'Text', text: /^Fable $/ })).toBeDefined()
+  expect(await back.find({ type: 'Text', text: /^\s*80%$/ })).toBeDefined()
+  expect(await back.find({ type: 'Text', text: /full in ~1h07/ })).toBeDefined()
+  await back.unmount()
+})
+
+test('USAGE shows no model row when the command cannot run or prints no per-model line', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const reply: Parameters<typeof bootUsage>[1] = { current: 'throw' }
+  const ran = bootUsage(on, reply)
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+  await clock.advance(1)
+  expect(ran.count).toBe(1)
+  const spawnFailed = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await spawnFailed.find({ type: 'Text', text: /5h/ })).toBeDefined()
+  expect(await spawnFailed.find({ type: 'Text', text: /Fable/ })).toBeUndefined()
+  await spawnFailed.unmount()
+
+  // Exit 0 with only the session and all-models lines: nothing to show, and the plain 2-cell labels stay.
+  reply.current = { exitCode: 0, stdout: 'Current session: 56% used · resets Oct 13 at 12pm (America/Denver)\nCurrent week (all models): 41% used · resets Oct 13 at 5pm (America/Denver)\n' }
+  await $.command.run({ command: 'sidebar', args: 'off', ...RUN })
+  await $.command.run({ command: 'sidebar', args: 'on', ...RUN })
+  await clock.advance(1)
+  expect(ran.count).toBe(2)
+  const none = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await none.find({ type: 'Text', text: /^5h $/ })).toBeDefined()
+  expect(await none.find({ type: 'Text', text: /41%/ })).toBeUndefined()
+  await none.unmount()
+})
+
+/** The reset text the panel draws for a model line whose `<when>` is `when`, at clock `now`; undefined when it draws none. */
+async function resetDrawn($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], now: number, when: string): Promise<string | undefined> {
+  const clock = mock.clock(on, { now })
+  bootUsage(on, { current: { exitCode: 0, stdout: `Current week (Fable): 12.5% used · resets ${when}\n` } })
+  await $.command.run({ command: 'sidebar', args: '', ...RUN })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  // The row is drawn whatever the reset text says; the engine's two windows draw the first two countdowns.
+  expect(await ui.find({ type: 'Text', text: /12\.5%/ })).toBeDefined()
+  const texts = (await ui.findAll({ type: 'Text', text: /resets in|reset due/ })).map(t => t.text.trim())
+  await ui.unmount()
+  return texts[2]
+}
+
+/** Month name, day and 12-hour clock text of the machine-local wall time at `ms`, as `/usage` would print it. */
+function localWhen(ms: number): string {
+  const at = new Date(ms)
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][at.getMonth()]
+  const h = at.getHours()
+  return `${mon} ${at.getDate()} at ${h % 12 === 0 ? 12 : h % 12}:${String(at.getMinutes()).padStart(2, '0')}${h < 12 ? 'am' : 'pm'}`
+}
+
+test('USAGE reads a model reset time with minutes in its named zone', async ($, on) => {
+  // Oct 7 7:30am in Denver (UTC-6) is 13:30Z, 90 minutes after NOW.
+  expect(await resetDrawn($, on, NOW, 'Oct 7 at 7:30am (America/Denver)')).toBe('resets in 1h 30m')
+})
+
+test('USAGE reads Oct 13 at 5pm (America/Denver) as 23:00Z', async ($, on) => {
+  expect(await resetDrawn($, on, NOW, 'Oct 13 at 5pm (America/Denver)')).toBe('resets in 6d')
+})
+
+test('USAGE reads 5pm in its zone as 23:00Z the same day', async ($, on) => {
+  expect(await resetDrawn($, on, NOW, 'Oct 7 at 5pm (America/Denver)')).toBe('resets in 11h 0m')
+})
+
+test('USAGE reads 12pm as noon', async ($, on) => {
+  // 12pm Denver is 18:00Z, six hours after NOW.
+  expect(await resetDrawn($, on, NOW, 'Oct 7 at 12pm (America/Denver)')).toBe('resets in 6h 0m')
+})
+
+test('USAGE reads 12am as midnight', async ($, on) => {
+  // 12am Oct 8 Denver is 06:00Z, eighteen hours after NOW.
+  expect(await resetDrawn($, on, NOW, 'Oct 8 at 12am (America/Denver)')).toBe('resets in 18h 0m')
+})
+
+test('USAGE reads Oct 13 at 5:30pm with no zone in the machine zone', async ($, on) => {
+  // The machine zone is whatever it is: the text names the local wall time 90 minutes after NOW.
+  expect(await resetDrawn($, on, NOW, localWhen(NOW + 90 * 60_000))).toBe('resets in 1h 30m')
+})
+
+test('USAGE picks the next year for a month already past', async ($, on) => {
+  // Dec 30 12:00Z: "Jan 2 at 9am" Denver is Jan 2 16:00Z of the next year, 3 days 4 hours on.
+  expect(await resetDrawn($, on, Date.parse('2026-12-30T12:00:00Z'), 'Jan 2 at 9am (America/Denver)')).toBe('resets in 3d')
+})
+
+test('USAGE keeps the row without a countdown when the reset text is unreadable', async ($, on) => {
+  expect(await resetDrawn($, on, NOW, 'sometime next week')).toBeUndefined()
+})
+
+test('USAGE keeps the row without a countdown when the zone is unknown', async ($, on) => {
+  expect(await resetDrawn($, on, NOW, 'Oct 13 at 5pm (Nowhere/Land)')).toBeUndefined()
+})

@@ -133,6 +133,8 @@ declare module 'claude-code' {
       /** Input + output tokens of every delegated run this session, faded rows included. */
       burned: number
       samples: Sample[]
+      /** Per-model weekly windows parsed from `claude -p /usage`; empty when the last poll failed or found none. */
+      modelWindows: Window[]
       compactions: Compactions
       effort: string | null
       mode: string | null

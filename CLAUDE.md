@@ -78,7 +78,10 @@ panel shows updates the README in the same commit.
 - Finished agent rows fade on a per-row `clock.after`; the minute tick also
   prunes, so rows settled on reload fade too.
 - The engine reports no per-model rate-limit split and no other model's window
-  size; both limits are stated in the README's "How it measures".
+  size; both limits are stated in the README's "How it measures". The per-model
+  USAGE row is a shim over `claude -p /usage` (polled every 5 minutes and on
+  open, parsed in `parseModelUsage`) pending anthropics/claude-code#101847;
+  drop it once the engine's `rateLimits` carries the split.
 
 ## Before any deploy
 
