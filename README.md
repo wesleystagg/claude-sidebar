@@ -1,18 +1,20 @@
 # claude-sidebar
 
 A docked side panel for [Claude Code](https://claude.com/claude-code) that keeps
-the numbers you otherwise go looking for in one place: how full the context
+the things you otherwise go looking for in one place: how full the context
 window is and what fills it, how fast the rate-limit windows are burning, which
-models this session has spent its tokens on, and every agent that was spawned,
-on which model, with how full its own window is.
+models this session has spent its tokens on, every agent that was spawned, on
+which model, with how full its own window is, and a file tree of the repo that
+shows what has changed and what the session is reading or writing right now,
+plus the files it touches outside the repo.
 
 Toggle it with `/sidebar`.
 
 ```
 MODEL  fable-5-1
 effort max · plan
-REPO   agency-os  main
-~/Projects/agency-os
+REPO   my-app  main
+~/code/my-app
 
 CONTEXT 42%  85k/200k
 ████████░░░░░░░░░░░░░░░▒▒▒▒▒
@@ -35,7 +37,7 @@ Fable █████████████░░░░     77%
 BY MODEL this session
 fable-5-1      ██████████  1.2M
 sonnet-5-5     ███░░░░░░░  300k
-⌂ bigcoder                3 calls
+⌂ local-coder             3 calls
 
 AGENTS 1 running · 84k tok
 ● coder                      1m30s
@@ -44,26 +46,26 @@ AGENTS 1 running · 84k tok
 ✓ coder-quick                  12s
   haiku-5-5 · Fix typo in README
 
-FILES claude-sidebar
+FILES my-app
 ⎇ main ↑1 origin/main                    +135 -4 N:1 M:2 D:1
 ▸ ■ .git
 ▸ ■ docs
-▾ ■ hooks                                    +129 -3 N:1 M:1
-    · register.test.tsx                                +88 A
-    · register.tsx                                  +41 -3 M
+▾ ■ src                                      +129 -3 N:1 M:1
+    · server.test.ts                                   +88 A
+    · server.ts                                     +41 -3 M
 ▸ ■ node_modules                                           ⊘
 ▾ ■ types                                                D:1
     · index.d.ts                        2026-10-09 17:42 ↑
     · old.d.ts                                             D
   · README.md                                        +6 -1 M
 
-ELSEWHERE ops-box
+ELSEWHERE infra
 ⎇ main origin/main                                +12 -3 M:2
   · compose.yml                                      +9 -1 M
   · README.md
   · scripts/backup.sh                                +3 -2 M
 
-ELSEWHERE scratchpad not a git repo
+ELSEWHERE notes not a git repo
   · notes.txt
 ```
 
@@ -225,8 +227,9 @@ case-insensitive alphabetical order of their folder's name.
 
 ## How it measures
 
-Everything comes from the Claude Code plugin API, with no extra API calls,
-except the per-model USAGE row, which is a `claude -p /usage` subprocess:
+Everything comes from the Claude Code plugin API and from git. The panel makes
+no model or API calls of its own; the one subprocess it runs is `claude -p
+/usage` for the per-model USAGE row.
 
 - Context figures use the engine's local estimate (`breakdown: "summary"`),
   so they can differ slightly from `/context`, which counts with the
@@ -294,7 +297,7 @@ claude plugin test .       # runs hooks/register.test.tsx against the engine
 To run a working copy in a session without installing it:
 
 ```bash
-claude --plugin-dir ~/Projects/claude-sidebar
+claude --plugin-dir /path/to/claude-sidebar
 ```
 
 Edits to an installed-from-folder copy reach a session with

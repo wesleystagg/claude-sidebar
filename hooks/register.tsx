@@ -181,7 +181,7 @@ function fmtAgo(ms: number): string {
   return `${Math.floor(mins / 60)}h ${mins % 60}m ago`
 }
 
-/** `/Users/wesley/Projects/agency-os` reads as `~/Projects/agency-os`; a long one keeps its tail. */
+/** `/Users/me/code/my-app` reads as `~/code/my-app`; a long one keeps its tail. */
 function shortPath(path: string, width: number): string {
   const home = /^\/Users\/[^/]+|^\/home\/[^/]+/.exec(path)
   const tidy = home ? `~${path.slice(home[0].length)}` : path
