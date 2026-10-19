@@ -3,7 +3,7 @@
 <!-- One or two sentences: what this is and who it's for. The audience matters more
      than the stack — it settles most close calls later. -->
 A Claude Code plugin (function-hooks module) that docks a side panel showing
-context, usage, tokens by model, and spawned agents. Built for Wesley's own
+context, usage, tokens by model, and spawned agents. Built for the maintainer's own
 sessions first; published so others can install it.
 
 `README.md` is what exists. **This file is how we work.**
@@ -15,7 +15,7 @@ sessions first; published so others can install it.
 <!-- Name the actual person. "Users" decides nothing; "a 78-year-old on an iPad who may
      not be well enough to do this twice" decides a lot. If there are two audiences
      (e.g. a buyer and an end user), say which one wins when they conflict. -->
-Wesley, running long multi-agent sessions and wanting to see the burn before
+The maintainer, running long multi-agent sessions and wanting to see the burn before
 the usage window fills. Anyone else installing it comes second: a change that
 makes the panel noisier for the daily driver is wrong even if it adds a feature.
 
@@ -24,7 +24,7 @@ makes the panel noisier for the daily driver is wrong even if it adds a feature.
 - **Ask before building anything non-trivial.** Comment a plan on the issue, set
   `feedback-wanted`, wait.
 - **Mock 2–3 directions with real content** for design work rather than picking one.
-- Wesley is IT — detail-rich answers, root cause, file:line, real numbers. No
+- The maintainer is IT — detail-rich answers, root cause, file:line, real numbers. No
   simplified summaries.
 - Concerns get raised once. If he reaffirms, that's the decision — proceed and say so.
 
@@ -32,9 +32,9 @@ makes the panel noisier for the daily driver is wrong even if it adds a feature.
 
 Work lives in GitHub issues, not in chat. Repo: `wesleystagg/claude-sidebar`.
 
-- 🟡 `feedback-wanted` — waiting on Wesley. Don't build it.
+- 🟡 `feedback-wanted` — waiting on the maintainer. Don't build it.
 - 🟢 `feedback-given` — he replied. Ready to act.
-- Comments post as the bot: `GH_TOKEN=$(gh auth token -u campcheck-claude) gh issue comment ...`
+- Comments post as the bot account; the account name and the `gh auth token -u <bot>` pattern live in the maintainer's private `~/.claude/docs/issue-queue.md`, not here.
 - `/triage` runs a pass over open issues against the default branch.
 - **Check for `feedback-given` issues when starting substantive work** — that's the
   queue, and nothing else surfaces it.
@@ -86,5 +86,5 @@ panel shows updates the README in the same commit.
 ## Before any deploy
 
 Nothing deploys. Publishing is a push to `main`; installs read the repo.
-Wesley's own machine installs from the local folder as marketplace
-`claude-sidebar`, so a push is not needed for him to see a change (`/reload-plugins`).
+The maintainer's own machine installs from the local folder as marketplace
+`claude-sidebar`, so a push is not needed for them to see a change (`/reload-plugins`).

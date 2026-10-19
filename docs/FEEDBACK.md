@@ -25,7 +25,7 @@ bare error description, because it says what should have happened.
 ## The two labels that keep us in sync
 
 Claude reads the issues, investigates against the current code, and comments with what
-it found and what it proposes. It can't change anything by itself — Wesley reviews
+it found and what it proposes. It can't change anything by itself — the maintainer reviews
 everything it builds.
 
 - 🟡 **`feedback-wanted`** — a plan or question on the issue is waiting for a human
@@ -39,7 +39,7 @@ If an issue has neither label, nobody is blocked — it's just queued.
 ## Who's who
 
 Comments from **campcheck-claude** are Claude's, posted through a machine account so
-it's always obvious which notes are automated and which are Wesley's. It's the same
+it's always obvious which notes are automated and which are the maintainer's. It's the same
 Claude that writes the code; the separate account exists so you can tell at a glance.
 
 <!-- TODO per project: anything specific about how feedback reaches this repo —

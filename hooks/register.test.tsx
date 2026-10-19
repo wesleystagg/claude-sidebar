@@ -66,8 +66,8 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
     return { value: usage() }
   })
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
-  on('session.cwd', () => ({ value: '/Users/wesley/Projects/agency-os' }))
-  on('session.repo', () => ({ value: { root: '/Users/wesley/Projects/agency-os', remote: null, internal: false, name: null } }))
+  on('session.cwd', () => ({ value: '/Users/me/code/my-app' }))
+  on('session.repo', () => ({ value: { root: '/Users/me/code/my-app', remote: null, internal: false, name: null } }))
   on('process.run', () => ({ value: { exitCode: 128, stdout: '', stderr: 'not mocked', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.read', (_, e) => ({ value: e.path.endsWith('/.git/HEAD') ? 'ref: refs/heads/main\n' : '' }))
   on('session.compact', () => ({ messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }], tokensBefore: 150_000, tokensAfter: 20_000 }))
@@ -107,9 +107,9 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
     expect(await ui.find({ type: 'Text', text: /^fable-5-1$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /none spawned yet/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /compact @ 83%/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^agency-os$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^my-app$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^main$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /~\/Projects\/agency-os/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /~\/code\/my-app/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /System prompt/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Messages/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /deferred/ })).toBeUndefined()
@@ -176,12 +176,12 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   await after.unmount()
 
   // A local fleet call through the MCP tool and through the cfn command line.
-  await $.tool.call({ tool: 'mcp__fleet__node_ask', tool_use_id: 'tu-2', node: 'gb10', model: 'bigcoder', prompt: 'x' })
+  await $.tool.call({ tool: 'mcp__fleet__node_ask', tool_use_id: 'tu-2', node: 'node1', model: 'local-coder', prompt: 'x' })
   await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-3', command: 'echo hi | cfn fleet ask -m coder' })
   await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-4', command: 'ls -la' })
   const local = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  expect(await local.find({ type: 'Text', text: /⌂ gb10/ })).toBeDefined()
-  expect(await local.find({ type: 'Text', text: /^\s*bigcoder$/ })).toBeDefined()
+  expect(await local.find({ type: 'Text', text: /⌂ node1/ })).toBeDefined()
+  expect(await local.find({ type: 'Text', text: /^\s*local-coder$/ })).toBeDefined()
   expect(await local.find({ type: 'Text', text: /⌂ fleet/ })).toBeDefined()
   expect(await local.find({ type: 'Text', text: /^\s*coder$/ })).toBeDefined()
   expect((await local.findAll({ type: 'Text', text: /^[●✓✗] $/ })).length).toBe(3)
@@ -204,7 +204,7 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   // BY MODEL: three API requests so far all answered by sonnet (42k each), two local calls by tag.
   expect(await modes.find({ type: 'Text', text: /^sonnet-5-5/ })).toBeDefined()
   expect(await modes.find({ type: 'Text', text: /^\s*126k$/ })).toBeDefined()
-  expect(await modes.find({ type: 'Text', text: /^⌂ bigcoder/ })).toBeDefined()
+  expect(await modes.find({ type: 'Text', text: /^⌂ local-coder/ })).toBeDefined()
   expect(await modes.find({ type: 'Text', text: /^\s*1 call$/ })).toBeDefined()
   await modes.unmount()
 
@@ -257,7 +257,7 @@ function segOf(p: { rows: any[] }, text: RegExp): any {
   return p.rows.flatMap(r => [...r.left, ...r.right]).find((g: any) => text.test(g.t))
 }
 
-const ROOT = '/Users/wesley/Projects/claude-sidebar'
+const ROOT = '/Users/me/code/claude-sidebar'
 const NUL = '\0'
 const CLEAN_MTIME = Date.parse('2026-03-04T09:05:00Z')
 
@@ -287,9 +287,9 @@ function gitAnswer(argv: readonly string[], cwd?: string): string | null {
 }
 
 /** ELSEWHERE fixtures: a repo outside the FILES root, a repo git cannot read, and a folder in no repo. */
-const OTHER = '/Users/wesley/Projects/other'
-const GONE = '/Users/wesley/Projects/gone'
-const LOOSE = '/Users/wesley/loose'
+const OTHER = '/Users/me/code/other'
+const GONE = '/Users/me/code/gone'
+const LOOSE = '/Users/me/loose'
 
 /** The git answers of OTHER: branch dev two behind, one modified file, an untracked and an ignored folder, one unpushed file. */
 function otherGitAnswer(argv: readonly string[]): string {
@@ -316,14 +316,14 @@ function bootFiles(on: Parameters<TestBody>[1], repo: boolean, fonts = false) {
   mock.store(on)
   on('session.usage', () => ({ value: usage() }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
-  on('session.cwd', () => ({ value: repo ? ROOT : '/Users/wesley/scratch' }))
+  on('session.cwd', () => ({ value: repo ? ROOT : '/Users/me/scratch' }))
   on('session.repo', () => ({ value: repo ? { root: ROOT, remote: null, internal: false, name: null } : null }))
-  on('env.get', () => ({ value: '/Users/wesley' }))
+  on('env.get', () => ({ value: '/Users/me' }))
   on('fs.read', () => ({ value: 'ref: refs/heads/main\n' }))
   on('fs.list', (_, e) => {
-    if (e.path === '/Users/wesley/Library/Fonts') return { value: fonts ? [file('JetBrainsMono Nerd Font Regular.ttf')] : [file('Helvetica.ttf')] }
+    if (e.path === '/Users/me/Library/Fonts') return { value: fonts ? [file('JetBrainsMono Nerd Font Regular.ttf')] : [file('Helvetica.ttf')] }
     if (e.path.toLowerCase().endsWith('fonts')) throw new Error('ENOENT')
-    if (e.path === '/Users/wesley/scratch') return { value: [file('notes.txt', CLEAN_MTIME), dir('src')] }
+    if (e.path === '/Users/me/scratch') return { value: [file('notes.txt', CLEAN_MTIME), dir('src')] }
     return { value: listRepo(e.path) }
   })
   on('process.run', (_, e) => {
@@ -559,7 +559,7 @@ test('FILES ignores shell writes and paths outside the repo', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
   expect(litRows(await filesProps(ui))).toEqual({})
   // the outside reads are looked up for ELSEWHERE, and neither exists, so nothing is recorded
-  expect(asked).toEqual(['/etc/hosts', '/Users/wesley/Projects/outside.txt'])
+  expect(asked).toEqual(['/etc/hosts', '/Users/me/code/outside.txt'])
   expect(await ui.find({ type: 'Text', text: /^ELSEWHERE$/ })).toBeUndefined()
   await ui.unmount()
 })
@@ -593,7 +593,7 @@ test('ELSEWHERE files outside reads and writes under their repo with git badges;
   await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o1', file_path: `${OTHER}/src/app.ts` })
   await $.tool.call({ tool: 'Write', tool_use_id: 'tu-o2', file_path: `${OTHER}/notes/todo.md`, content: 'x' })
   await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o3', file_path: `${OTHER}/build/out.js` })
-  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-o4', command: 'cat ~/Projects/other/lib/util.ts && ls ~/Projects/other/src' })
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-o4', command: 'cat ~/code/other/lib/util.ts && ls ~/code/other/src' })
   await $.tool.call({ tool: 'Edit', tool_use_id: 'tu-o5', file_path: `${GONE}/a.txt`, old_string: 'a', new_string: 'b' })
   await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o6', file_path: `${LOOSE}/x.txt` })
   await $.tool.call({ tool: 'Read', tool_use_id: 'tu-o7', file_path: `${ROOT}/README.md` })
@@ -678,9 +678,9 @@ function bootUsage(on: Parameters<TestBody>[1], usageReply: { current: { exitCod
   mock.store(on)
   on('session.usage', () => ({ value: usage() }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
-  on('session.cwd', () => ({ value: '/Users/wesley/Projects/agency-os' }))
+  on('session.cwd', () => ({ value: '/Users/me/code/my-app' }))
   on('session.repo', () => ({ value: null }))
-  on('env.get', () => ({ value: '/Users/wesley' }))
+  on('env.get', () => ({ value: '/Users/me' }))
   on('fs.read', () => ({ value: '' }))
   on('fs.list', () => ({ value: [] }))
   on('process.run', (_, e) => {
