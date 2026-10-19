@@ -131,24 +131,23 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${(m % 60).toString().padStart(2, '0')}m`
 }
 
-/** `claude-sonnet-5-5` reads as `sonnet-5-5`; a local tag or alias is left as it is. */
+/** `claude-sonnet-5-5` reads as `sonnet-5-5`; any other id is left as it is. */
 function shortModel(id: string): string {
   return id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
 }
 
-/** The theme color of a model's tier: frontier orange, Sonnet blue, Haiku green, a local model in the IDE color. */
-function tierColor(id: string, local: boolean): string {
-  if (local) return 'ide'
+/** The theme color of a model's tier: frontier orange, Sonnet blue, Haiku green. */
+function tierColor(id: string): string {
   if (isFrontier(id)) return 'claude'
   if (/sonnet/i.test(id)) return 'permission'
   if (/haiku/i.test(id)) return 'success'
   return 'text'
 }
 
-async function tally($: EngineInterface, id: string, tokens: number, local: boolean): Promise<void> {
+async function tally($: EngineInterface, id: string, tokens: number): Promise<void> {
   await update($, byModel, table => {
-    const prev: ModelTally = table[id] ?? { tokens: 0, calls: 0, local }
-    return { ...table, [id]: { tokens: prev.tokens + tokens, calls: prev.calls + 1, local } }
+    const prev: ModelTally = table[id] ?? { tokens: 0, calls: 0 }
+    return { ...table, [id]: { tokens: prev.tokens + tokens, calls: prev.calls + 1 } }
   })
 }
 
@@ -220,15 +219,6 @@ function fit(text: string, width: number): string {
   if (width <= 0) return ''
   if (text.length <= width) return text.padEnd(width)
   return width > 1 ? `${text.slice(0, width - 1)}…` : text.slice(0, width)
-}
-
-/** The model and node a `cfn ... ask` shell command names, or null for any other command. */
-function parseCfnAsk(command: string): { node: string; model: string } | null {
-  const fleet = /\bcfn\s+fleet\s+ask\b/.exec(command)
-  const node = /\bcfn\s+node\s+(\S+)\s+ask\b/.exec(command)
-  if (!fleet && !node) return null
-  const m = /\s(?:-m|--model)[\s=]+(\S+)/.exec(command)
-  return { node: node?.[1] ?? 'fleet', model: m?.[1] ?? 'fast' }
 }
 
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
@@ -464,7 +454,7 @@ async function reconcileRuns($: EngineInterface): Promise<void> {
     const now = await $.clock.now()
     await update($, agents, list =>
       list.map(row => {
-        if (row.status !== 'running' || row.type === 'local') return row
+        if (row.status !== 'running') return row
         const found = live.find(a => a.id === row.id)
         const isLive = found && (found.status === 'pending' || found.status === 'running' || found.status === 'waiting')
         if (isLive) return row
@@ -1479,32 +1469,6 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  // A prompt sent to a local fleet model through the fleet MCP tools.
-  on('tool.call', { tool: 'mcp__fleet__fleet_ask' }, async ($, e, next) => {
-    const isOn = await read($, enabled)
-    const node = typeof e.node === 'string' ? e.node : 'fleet'
-    const tag = typeof e.model === 'string' ? e.model : 'fast'
-    if (isOn) await addRun($, { id: e.tool_use_id, label: node, type: 'local', model: tag })
-    const ran = await next(e)
-    if (isOn) {
-      await endRun($, e.tool_use_id, ran.isError ? 'failed' : 'done')
-      await tally($, tag, 0, true)
-    }
-    return ran
-  })
-  on('tool.call', { tool: 'mcp__fleet__node_ask' }, async ($, e, next) => {
-    const isOn = await read($, enabled)
-    const node = typeof e.node === 'string' ? e.node : 'fleet'
-    const tag = typeof e.model === 'string' ? e.model : 'fast'
-    if (isOn) await addRun($, { id: e.tool_use_id, label: node, type: 'local', model: tag })
-    const ran = await next(e)
-    if (isOn) {
-      await endRun($, e.tool_use_id, ran.isError ? 'failed' : 'done')
-      await tally($, tag, 0, true)
-    }
-    return ran
-  })
-
   // Files the session reads and writes: marked before the tool runs so the mark shows while it works.
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     await markActivity($, e.file_path, 'read')
@@ -1529,17 +1493,10 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  // The same through the cfn command line.
+  // Files a shell command reads are marked before it runs.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     await markShellReads($, e.command)
-    const ask = parseCfnAsk(e.command)
-    const isOn = ask !== null && (await read($, enabled))
-    if (isOn) await addRun($, { id: e.tool_use_id, label: ask.node, type: 'local', model: ask.model })
     const ran = await next(e)
-    if (isOn) {
-      await endRun($, e.tool_use_id, ran.isError ? 'failed' : 'done')
-      await tally($, ask.model, 0, true)
-    }
     await refreshFilesIfOn($)
     return ran
   })
@@ -1721,17 +1678,17 @@ export const register: Register = (on, options) => {
               <Text dimColor>this session</Text>
             </Box>
             {tallies.map(([id, t]) => {
-              const color = tierColor(id, t.local)
-              const cells = t.local ? 0 : Math.max(1, Math.round((t.tokens / topTokens) * CTX_BAR))
+              const color = tierColor(id)
+              const cells = Math.max(1, Math.round((t.tokens / topTokens) * CTX_BAR))
               return (
                 <Box key={`model-${id}`}>
                   <Text color={color} wrap="truncate">
-                    {fit(`${t.local ? '⌂ ' : ''}${shortModel(id)}`, Math.max(6, width - CTX_BAR - 8))}
+                    {fit(`${shortModel(id)}`, Math.max(6, width - CTX_BAR - 8))}
                   </Text>
-                  {!t.local && <Text color={color}>{'█'.repeat(cells)}</Text>}
-                  {!t.local && <Text dimColor>{'░'.repeat(CTX_BAR - cells)}</Text>}
+                  <Text color={color}>{'█'.repeat(cells)}</Text>
+                  <Text dimColor>{'░'.repeat(CTX_BAR - cells)}</Text>
                   <Text dimColor>
-                    {' '}{t.local ? `${t.calls} call${t.calls === 1 ? '' : 's'}`.padStart(7) : fmtBig(t.tokens).padStart(6)}
+                    {' '}{fmtBig(t.tokens).padStart(6)}
                   </Text>
                 </Box>
               )
@@ -1750,20 +1707,19 @@ export const register: Register = (on, options) => {
         {runs.map(r => {
           const color = STATUS_COLOR[r.status]
           const elapsed = fmtElapsed((r.endedAt ?? snap.takenAt) - r.startedAt)
-          const who = r.type === 'local' ? `⌂ ${r.label}` : r.type
           return (
             <Box key={`run-${r.id}`} flexDirection="column">
               <Box>
                 <Text color={color}>{STATUS_MARK[r.status]} </Text>
                 <Text color={color} dimColor={r.status !== 'running'} wrap="truncate">
-                  {fit(who, runLabelWidth)}
+                  {fit(r.type, runLabelWidth)}
                 </Text>
                 <Text dimColor>{' '}{elapsed.padStart(6)}</Text>
               </Box>
               <Box>
-                {r.type !== 'local' && isFrontier(r.model) && <Text color="error">{'  ⚠ frontier '}</Text>}
+                {isFrontier(r.model) && <Text color="error">{'  ⚠ frontier '}</Text>}
                 <Text dimColor wrap="truncate">
-                  {r.type !== 'local' && isFrontier(r.model) ? '' : '  '}{shortModel(r.model)}{r.type === 'local' || r.label === '' ? '' : ` · ${r.label}`}
+                  {isFrontier(r.model) ? '' : '  '}{shortModel(r.model)}{r.label === '' ? '' : ` · ${r.label}`}
                 </Text>
               </Box>
               {r.contextTokens !== undefined && (

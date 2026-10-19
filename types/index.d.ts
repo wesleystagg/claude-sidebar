@@ -33,11 +33,10 @@ export type Compactions = {
   lastAt?: number
 }
 
-/** What one model has consumed this session: tokens for an API model, calls alone for a local one. */
+/** What one model has consumed this session: tokens and request count. */
 export type ModelTally = {
   tokens: number
   calls: number
-  local: boolean
 }
 
 export type Place = {
@@ -46,12 +45,12 @@ export type Place = {
   branch?: string
 }
 
-/** One delegated run: a subagent the Agent tool spawned, or a prompt sent to a local fleet model. */
+/** One delegated run: a subagent the Agent tool spawned. */
 export type AgentRow = {
   id: string
-  /** The Agent call's short description, or for a local run the node it went to. */
+  /** The Agent call's short description. */
   label: string
-  /** The agent type (`coder`, `Explore`, ...) or `local` for a fleet call. */
+  /** The agent type (`coder`, `Explore`, ...) */
   type: string
   /** The model it runs on, as resolved at spawn, or the one that answered once known. */
   model: string

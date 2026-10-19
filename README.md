@@ -37,7 +37,6 @@ Fable █████████████░░░░     77%
 BY MODEL this session
 fable-5-1      ██████████  1.2M
 sonnet-5-5     ███░░░░░░░  300k
-⌂ local-coder             3 calls
 
 AGENTS 1 running · 84k tok
 ● coder                      1m30s
@@ -124,12 +123,10 @@ the bars shorten to match.
 
 **BY MODEL.** Tokens this session by the model that answered each request,
 main loop and subagents alike, with bars scaled to the top model and colored
-by tier (frontier orange, Sonnet blue, Haiku green). Local models reached
-through the fleet tools show a call count instead. Resets with each session.
+by tier (frontier orange, Sonnet blue, Haiku green). Resets with each session.
 
 **AGENTS.** One row per delegated run: a subagent spawned through the Agent
-tool, or a prompt sent to a local model through the `fleet` MCP tools or a
-`cfn fleet ask` / `cfn node <name> ask` shell command. Each row shows the agent
+tool. Each row shows the agent
 type, elapsed time, the model it runs on and its task; a subagent row also
 gets a small bar of its own context fill (its latest request's input side,
 against the session model's window), its tool-call count and the tool it is

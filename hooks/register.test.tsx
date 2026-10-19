@@ -175,18 +175,6 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   expect(await after.find({ type: 'Text', text: /1m30s/ })).toBeDefined()
   await after.unmount()
 
-  // A local fleet call through the MCP tool and through the cfn command line.
-  await $.tool.call({ tool: 'mcp__fleet__node_ask', tool_use_id: 'tu-2', node: 'node1', model: 'local-coder', prompt: 'x' })
-  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-3', command: 'echo hi | cfn fleet ask -m coder' })
-  await $.tool.call({ tool: 'Bash', tool_use_id: 'tu-4', command: 'ls -la' })
-  const local = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
-  expect(await local.find({ type: 'Text', text: /⌂ node1/ })).toBeDefined()
-  expect(await local.find({ type: 'Text', text: /^\s*local-coder$/ })).toBeDefined()
-  expect(await local.find({ type: 'Text', text: /⌂ fleet/ })).toBeDefined()
-  expect(await local.find({ type: 'Text', text: /^\s*coder$/ })).toBeDefined()
-  expect((await local.findAll({ type: 'Text', text: /^[●✓✗] $/ })).length).toBe(3)
-  await local.unmount()
-
   // Effort rides on the main loop's requests, the permission mode on the prompt's classic hook.
   {
     const stream = $.turn.step({ turnId: 't-2', index: 0, model: 'claude-fable-5-1', effort: 'max', messageCount: 10 })
@@ -201,11 +189,9 @@ test('/sidebar opens the pane and draws context segments and usage rows', async 
   expect(await modes.find({ type: 'Text', text: /effort max/ })).toBeDefined()
   expect(await modes.find({ type: 'Text', text: /^plan$/ })).toBeDefined()
   expect(await modes.find({ type: 'Text', text: /compacted 1× · last just now/ })).toBeDefined()
-  // BY MODEL: three API requests so far all answered by sonnet (42k each), two local calls by tag.
+  // BY MODEL: three API requests so far all answered by sonnet (42k each).
   expect(await modes.find({ type: 'Text', text: /^sonnet-5-5/ })).toBeDefined()
   expect(await modes.find({ type: 'Text', text: /^\s*126k$/ })).toBeDefined()
-  expect(await modes.find({ type: 'Text', text: /^⌂ local-coder/ })).toBeDefined()
-  expect(await modes.find({ type: 'Text', text: /^\s*1 call$/ })).toBeDefined()
   await modes.unmount()
 
   // Burn rate: the 5h window climbs 2 points a minute over four ticks, so a "full in" estimate appears.

@@ -1,6 +1,6 @@
 {
   "name": "sidebar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Docked side panel for Claude Code: context window by category, rate-limit usage with burn rate, tokens by model, every spawned agent with its model and context fill, and a file tree showing git changes and what the session is touching. Toggle with /sidebar.",
   "types": "./types/index.d.ts",
   "author": {
