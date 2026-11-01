@@ -11,6 +11,14 @@ const WANT_COLUMNS = 60
 const TICK_MS = 60_000
 /** `claude -p /usage` is a ~1 s subprocess, so it is polled on its own slower cadence, not on every tick. */
 const MODEL_USAGE_MS = 5 * 60_000
+/**
+ * Whether this process is the `claude -p /usage` child: CLAUDE_SIDEBAR_USAGE_POLL=1 in its environment, read
+ * once at `session.start`. That headless run loads this plugin too, and without the mark its own `startTick`
+ * would spawn another `claude -p /usage`, which would spawn another: an unending chain of 1-3 s processes,
+ * each orphaning the next (15-18 alive at once, ~637% CPU, and each start-up's `git status` holding the
+ * repo's index.lock). A process started with the mark never polls.
+ */
+let usageChild = false
 const MAX_AGENT_ROWS = 12
 /** A finished run's row fades this long after it ended; running rows always stay. */
 const FADE_MS = 2 * 60_000
@@ -301,7 +309,11 @@ async function refreshModelUsage($: EngineInterface): Promise<void> {
     try {
       // --no-session-persistence: a plain `claude -p` writes a transcript file per run (288 a day at this cadence).
       // --strict-mcp-config with no --mcp-config: start no MCP servers; /usage needs none and it halves the start-up.
-      const done = await $.process.run(['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config'], { timeoutMs: 20_000 })
+      // The mark keeps the child from polling in its turn (see usageChild).
+      const done = await $.process.run(['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config'], {
+        timeoutMs: 20_000,
+        env: { CLAUDE_SIDEBAR_USAGE_POLL: '1' },
+      })
       now = await $.clock.now()
       if (done.exitCode === 0) found = parseModelUsage(done.stdout, now)
     } catch {
@@ -1331,7 +1343,9 @@ function startTick($: EngineInterface): void {
   })
   // The per-model rows come from a subprocess: once now, then every MODEL_USAGE_MS. Whatever an
   // earlier open left is dropped first, so a figure from before the panel closed never shows.
+  // The `claude -p /usage` child itself never polls: that is the recursion CLAUDE_SIDEBAR_USAGE_POLL cuts.
   modelTick?.cancel()
+  if (usageChild) return
   void update($, modelWindows, () => []).then(() => refreshModelUsage($))
   modelTick = $.clock.every(MODEL_USAGE_MS, () => void refreshModelUsage($))
 }
@@ -1352,6 +1366,7 @@ export const register: Register = (on, options) => {
     })
     const isOn = (await $.store.get(STORE_KEY)) === true
     await update($, enabled, () => isOn)
+    usageChild = (await $.env.get('CLAUDE_SIDEBAR_USAGE_POLL')) === '1'
     await resolveGlyphs($, options.glyphs)
     if (isOn) {
       void refresh($)

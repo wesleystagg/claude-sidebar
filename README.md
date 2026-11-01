@@ -115,7 +115,11 @@ It is read by running Claude Code's own `claude -p /usage` (no model call, about
 one second, no session file written, no MCP servers started) and taking every `Current week (<model>): N% used · resets ...`
 line except the all-models one; the engine's rate-limit figures carry no
 per-model window. The command runs once when the panel opens and then every five
-minutes, never on the per-minute tick, one run at a time. If it fails, exits
+minutes, never on the per-minute tick, one run at a time. The run is started
+with `CLAUDE_SIDEBAR_USAGE_POLL=1` in its environment, and a copy of the panel
+loaded by a process carrying that variable never polls: the headless run loads
+the plugin too, and without the mark it would start another run, and that one
+another, without end. If it fails, exits
 non-zero or prints no such line, the row vanishes: it is never left showing an
 old figure. A reset time that cannot be parsed leaves the row with its
 percentage and no countdown. The label column widens to the longest name, and

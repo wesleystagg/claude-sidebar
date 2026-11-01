@@ -658,21 +658,30 @@ Current week (Fable): 77% used · resets Oct 13 at 5pm (America/Denver)
 What's contributing to your limits usage?
 `
 
-/** The mocks a USAGE test needs; `usageReply` is what `claude -p /usage` answers, and `ran` counts its runs. */
-function bootUsage(on: Parameters<TestBody>[1], usageReply: { current: { exitCode: number; stdout: string } | 'throw' }) {
-  const ran = { count: 0, argv: [] as string[] }
-  mock.store(on)
+/**
+ * The mocks a USAGE test needs; `usageReply` is what `claude -p /usage` answers, and `ran` counts its runs and
+ * keeps the last one's argv and env. `env` is the process environment the plugin reads; absent, every variable
+ * answers `/Users/me`, as the other tests' HOME does. `storedOn` stores the panel as on, as a session.start finds it.
+ */
+function bootUsage(on: Parameters<TestBody>[1], usageReply: { current: { exitCode: number; stdout: string } | 'throw' }, env?: Record<string, string>, storedOn = false) {
+  const ran = { count: 0, argv: [] as string[], env: undefined as Record<string, string> | undefined }
+  mock.store(on, storedOn ? { enabled: true } : {})
   on('session.usage', () => ({ value: usage() }))
   on('session.model', () => ({ value: 'claude-fable-5-1' }))
   on('session.cwd', () => ({ value: '/Users/me/code/my-app' }))
   on('session.repo', () => ({ value: null }))
-  on('env.get', () => ({ value: '/Users/me' }))
+  if (env) mock.env(on, env)
+  else on('env.get', () => ({ value: '/Users/me' }))
   on('fs.read', () => ({ value: '' }))
   on('fs.list', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'sidebar' } }))
+  on('ui.panes', () => ({ value: [] }))
   on('process.run', (_, e) => {
     if (e.argv[0] === 'claude') {
       ran.count += 1
       ran.argv = [...e.argv]
+      ran.env = e.init?.env
       const reply = usageReply.current
       if (reply === 'throw') throw new Error('spawn claude ENOENT')
       return { value: { exitCode: reply.exitCode, stdout: reply.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -692,6 +701,8 @@ test('USAGE adds a per-model weekly row from claude -p /usage, and drops it when
   await $.command.run({ command: 'sidebar', args: '', ...RUN })
   await clock.advance(1)
   expect(ran.argv).toEqual(['claude', '-p', '/usage', '--no-session-persistence', '--strict-mcp-config'])
+  // The child is marked so that its own copy of this plugin never polls (the test below).
+  expect(ran.env).toEqual({ CLAUDE_SIDEBAR_USAGE_POLL: '1' })
   expect(ran.count).toBe(1)
 
   const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
@@ -736,6 +747,42 @@ test('USAGE adds a per-model weekly row from claude -p /usage, and drops it when
   expect(await back.find({ type: 'Text', text: /^\s*80%$/ })).toBeDefined()
   expect(await back.find({ type: 'Text', text: /full in ~1h07/ })).toBeDefined()
   await back.unmount()
+})
+
+test('USAGE never runs claude -p /usage in the process that mark names as the /usage child', async ($, on) => {
+  // The headless `claude -p /usage` run loads this plugin too, with the panel stored as on. Without the mark
+  // its session.start would spawn another /usage run, and so on without end: here it must spawn nothing, at
+  // start, on the 5-minute cadence, or when the command is run by hand.
+  const clock = mock.clock(on, { now: NOW })
+  const reply: Parameters<typeof bootUsage>[1] = { current: { exitCode: 0, stdout: USAGE_TEXT } }
+  const ran = bootUsage(on, reply, { HOME: '/Users/me', CLAUDE_SIDEBAR_USAGE_POLL: '1' }, true)
+
+  await $.session.start({ cwd: '/Users/me/code/my-app', surface: null, isInteractive: false })
+  await clock.advance(1)
+  expect(ran.count).toBe(0)
+  await clock.advance(3 * 5 * 60_000)
+  expect(ran.count).toBe(0)
+
+  await $.command.run({ command: 'sidebar', args: 'off', ...RUN })
+  await $.command.run({ command: 'sidebar', args: 'on', ...RUN })
+  await clock.advance(5 * 60_000 + 1)
+  expect(ran.count).toBe(0)
+  // The panel itself still works there; only the per-model row is missing.
+  const ui = await $.ui.mount({ plugin: 'sidebar', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /5h/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Fable/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('USAGE polls from an interactive session.start with the panel stored as on', async ($, on) => {
+  // The counterpart of the test above: the same start with no mark does poll, so the mark is what stops it.
+  const clock = mock.clock(on, { now: NOW })
+  const reply: Parameters<typeof bootUsage>[1] = { current: { exitCode: 0, stdout: USAGE_TEXT } }
+  const ran = bootUsage(on, reply, { HOME: '/Users/me' }, true)
+  await $.session.start({ cwd: '/Users/me/code/my-app', surface: 'terminal', isInteractive: true })
+  await clock.advance(1)
+  expect(ran.count).toBe(1)
+  expect(ran.env).toEqual({ CLAUDE_SIDEBAR_USAGE_POLL: '1' })
 })
 
 test('USAGE shows no model row when the command cannot run or prints no per-model line', async ($, on) => {
